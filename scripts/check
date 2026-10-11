@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Run local checks and record only actual executed checks in VERIFICATION.json."""
+import datetime
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def timestamp():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def version(command):
+    try:
+        return subprocess.check_output(command, text=True, stderr=subprocess.STDOUT).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return 'unavailable'
+
+
+def source_provenance():
+    try:
+        revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        dirty = bool(subprocess.check_output(['git', 'status', '--porcelain', '-z'], cwd=ROOT))
+        paths = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=ROOT)
+        digest = hashlib.sha256()
+        count = 0
+        for name in sorted(set(paths.split(b'\0'))):
+            if not name or name == b'VERIFICATION.json' or name.startswith((b'target/', b'.git/')):
+                continue
+            source = ROOT / os.fsdecode(name)
+            digest.update(name + b'\0')
+            if source.is_symlink():
+                digest.update(b'symlink\0' + os.fsencode(os.readlink(source)))
+            elif source.is_file():
+                digest.update(hashlib.sha256(source.read_bytes()).digest())
+            else:
+                digest.update(b'missing')
+            digest.update(b'\0')
+            count += 1
+        return {'git_revision': revision, 'git_dirty': dirty, 'source_sha256': digest.hexdigest(),
+                'source_files': count,
+                'hash_scope': 'Git tracked and nonignored untracked paths; excludes target, .git and generated VERIFICATION.json.'}
+    except (OSError, subprocess.CalledProcessError) as error:
+        return {'error': str(error)}
+
+
+def main():
+    logs = ROOT / 'target/check-logs'
+    logs.mkdir(parents=True, exist_ok=True)
+    artifact_report = ROOT / 'target/check-artifacts.json'
+    build_directory = Path(os.environ.get('CARGO_TARGET_DIR', 'target'))
+    if not build_directory.is_absolute():
+        build_directory = ROOT / build_directory
+    binary = build_directory.resolve() / 'release/fim'
+    commands = [
+        ('rustfmt', ['cargo', 'fmt', '--all', '--', '--check']),
+        ('rust-tests', ['cargo', 'test', '--locked', '--all-targets']),
+        ('clippy', ['cargo', 'clippy', '--locked', '--all-targets', '--', '-D', 'warnings']),
+        ('release-build', ['cargo', 'build', '--locked', '--release']),
+        ('cli-smoke', [sys.executable, 'tests/cli_smoke.py', str(binary)]),
+        ('deploy-regression', [sys.executable, 'tests/deploy_regression.py']),
+        ('artifact-native-probes', [sys.executable, 'tests/validate_artifacts.py', '--output', str(artifact_report)]),
+    ]
+    report = {
+        'generated_at': timestamp(),
+        'scope': 'Local checkout checks; static systemd verification uses an isolated root and fake executable fixtures.',
+        'environment': {'platform': platform.platform(), 'python': platform.python_version(),
+                        'rustc': version(['rustc', '--version']), 'cargo': version(['cargo', '--version'])},
+        'source_provenance': source_provenance(),
+        'checks': [],
+        'not_verified': ['Production installation or running systemd services', 'Actual email inbox delivery'],
+    }
+    outcome = 0
+    for name, command in commands:
+        print('\n$ ' + shlex.join(command), flush=True)
+        started = time.monotonic()
+        result = {'check': name, 'command': command, 'started_at': timestamp()}
+        logfile = logs / (name + '.log')
+        output = []
+        try:
+            with logfile.open('w') as log:
+                process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, text=True)
+                for line in process.stdout:
+                    print(line, end='', flush=True)
+                    log.write(line)
+                    output.append(line)
+                code = process.wait()
+        except OSError as error:
+            print(error, file=sys.stderr)
+            code = 127
+            result['error'] = str(error)
+        result.update(exit_code=code, status='passed' if code == 0 else 'failed',
+                      duration_seconds=round(time.monotonic() - started, 3),
+                      log=str(logfile.relative_to(ROOT)))
+        results = re.findall(r'test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored;', ''.join(output))
+        if results:
+            result['rust_suites'] = [{'result': state, 'passed': int(passed), 'failed': int(failed), 'ignored': int(ignored)}
+                                     for state, passed, failed, ignored in results]
+        report['checks'].append(result)
+        if name == 'artifact-native-probes' and code == 0:
+            report['artifact_native_probes'] = json.loads(artifact_report.read_text())
+        if code:
+            outcome = code
+            break
+    report['completed_at'] = timestamp()
+    report['status'] = 'passed' if outcome == 0 else 'failed'
+    report['not_run'] = [name for name, _ in commands[len(report['checks']):]]
+    after = source_provenance()
+    report['source_unchanged_during_checks'] = (
+        'source_sha256' in after
+        and report['source_provenance'].get('source_sha256') == after['source_sha256']
+        and report['source_provenance'].get('git_revision') == after.get('git_revision')
+    )
+    if binary.is_file() and any(result['check'] == 'release-build' and result['status'] == 'passed'
+                                for result in report['checks']):
+        report['release_binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
+    (ROOT / 'VERIFICATION.json').write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+    print('\nVerification report: ' + str(ROOT / 'VERIFICATION.json'))
+    return outcome
+
+
+if __name__ == '__main__':
+    sys.exit(main())

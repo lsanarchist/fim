@@ -13,19 +13,19 @@ Linux-файловій системі, не `/mnt/c`.
 
 ## Статус перевірки — прочитати перед використанням
 
-У середовищі підготовки **не було Rust/Cargo, а завантажити інструментарій не
-вдалося**. Тому немає підтвердженої збірки, успішного запуску Rust-тестів,
-Clippy чи перевіреного systemd-розгортання. Додано **40 Rust-регресійних тестів**,
-CLI smoke-тести та workflow CI для їх фактичного виконання.
+Єдиний локальний запуск перевірок — `./scripts/check`: форматування, Rust-тести,
+Clippy з `-D warnings`, release-збірка, CLI-сценарії, ізольовані deployment-тести
+та перевірки артефактів. Cargo використовує збережений `Cargo.lock` і `--locked`.
+GitHub використовується для контролю версій; GitHub Actions не потрібні.
 
-Тут виконано 9 перевірок конфігурації, календаря, шаблону, SQL-схем та нативних
-Linux-примітивів. Перевірки системних викликів запускалися через Python/ctypes,
-**а не через зібраний Rust-код**. Точний звіт: `VERIFICATION.json`.
-Ці результати не замінюють компіляцію чи end-to-end тестування.
+`VERIFICATION.json` містить час, команди й результати фактично виконаного
+локального запуску; його логи зберігаються в `target/check-logs/`. Окремі
+Python/ctypes та SQLite probes позначені власною областю перевірки й не
+видаються за виконання Rust-коду. `tests/validate_artifacts.py` сам по собі
+не переписує цей загальний звіт і не робить висновків про запуск Rust-тестів.
 
-`Cargo.lock` навмисно не вигадано. Після успішного розв'язання залежностей,
-збірки та тестування збережіть реальний lockfile і надалі використовуйте
-`--locked`. CI зберігає lockfile, версію Rust та логи перевірок як артефакт.
+Локальна збірка й статична перевірка systemd не підтверджують production-install,
+роботу живих сервісів або доставку листа до inbox; ці перевірки окремі.
 
 ## Відповідність завданню
 
@@ -44,16 +44,14 @@ Linux-примітивів. Перевірки системних викликі
 
 ## Локальний запуск для лабораторної
 
-Потрібні актуальний stable Rust/Cargo, C-компілятор для bundled SQLite та Linux.
+Потрібні актуальний stable Rust/Cargo, C-компілятор для bundled SQLite, Linux,
+Python 3.11+ та системна база часових зон `tzdata`. Для повної статичної
+перевірки deployment потрібен `systemd-analyze`.
 Для реальної пошти потрібен налаштований локальний sendmail-сумісний сервіс.
 Вбудовані тести використовують його імітацію й не надсилають зовнішніх листів.
 
 ```sh
-cargo fmt --all
-cargo test --all-targets
-cargo clippy --all-targets
-cargo build --release
-python3 tests/cli_smoke.py target/release/fim
+./scripts/check
 
 mkdir -p state staging
 chmod 700 state staging
@@ -223,6 +221,15 @@ O(загальний обсяг прочитаних даних); великий
 а непереписані записи можуть бути відтворені в лог після відновлення. За
 недоступності БД є обмежений RAM-буфер; stderr потрапляє до journald при systemd.
 
+Запис JSONL і ротація використовують спільне міжпроцесне блокування;
+стабільний lock-файл — `state_dir/fim.log.lock`. Паралельні `watch`, `page`
+і `deliver` не перемішують частини рядків.
+Якщо запис завершується помилкою після частини JSON-рядка, логер під тим самим
+lock намагається відновити попередню довжину файла; помилка відновлення теж
+потрапляє до fallback-діагностики.
+Під час масового reconcile аудит скидається в SQLite пакетами, тому справна
+БД не спричиняє втрату подій через обмеження резервного RAM-буфера.
+
 За одночасної відмови диска, БД, stderr/журналювання та каналу сповіщення
 гарантувати збереження всіх подій неможливо. RAM-буфер обмежений 4096 подіями;
 його переповнення явно сигналізується як `AUDIT_LOSS`. Pending-листи та
@@ -238,17 +245,18 @@ Postfix. Сам інсталяційний скрипт **не встановл�
 setgid-helper локальної пошти.
 
 ```sh
-cargo test --all-targets
-cargo build --release
+./scripts/check
 sudo ./deploy/install.sh
 sudoedit /opt/fim/config.json
+# Після початкового редагування config і перед першим запуском timer:
+sudo systemctl daemon-reload
 
 sudo -u fim /opt/fim/fim /opt/fim/config.json alert-test
 # Переконайтеся, що тестовий лист надійшов.
 
 sudo -u fim /opt/fim/fim /opt/fim/config.json page
 sudo /opt/fim/fim /opt/fim/config.json init
-sudo systemctl enable --now fim.service fim-page.timer
+sudo systemctl enable --now fim-config.path fim.service fim-page.timer
 ```
 
 Вебсервер має публікувати **лише `/var/www/fim/site`**. `www-data` не повинен
@@ -262,20 +270,36 @@ publisher запускаються під окремим від вебсерве
 read-only; publisher працює в іншому service namespace. Це не ізоляція від
 компрометації самого UID `fim`.
 
-Timer задає `Europe/Bratislava` у розкладі явно, а не через непридатний для
-цього `TZ` у рядку cron. Watchdog реагує, якщо основний цикл перестає завершувати
+Інсталятор спочатку перевіряє наявність усіх вхідних файлів, зокрема
+`site/style.css`, та валідність IANA timezone. Відмова цього preflight не
+створює користувача, каталоги або файли інсталяції.
+
+Systemd-generator створює `OnCalendar` для опівночі саме в `timezone` з
+`/opt/fim/config.json` при boot/`daemon-reload`. `fim-config.path` відстежує
+подальші зміни конфігурації й перегенеровує та перезапускає timer; за
+некоректної timezone розклад вимикається з помилкою. Якщо path-unit вимкнений,
+після редагування виконайте `sudo systemctl daemon-reload` та
+`sudo systemctl restart fim-page.timer` вручну. Зміна timezone також змінює
+прив'язану до baseline політику й потребує свідомого адміністрування еталона
+на перевіреному сайті; автоматичного оновлення baseline немає.
+
+Watchdog реагує, якщо основний цикл перестає завершувати
 перевірки. `OnFailure` має окремий Python-helper, який не залежить від baseline,
 state.db або справності Rust-бінарного файла. Він усе ще потребує читабельної
 конфігурації і працездатного MTA; це не заміна незалежному зовнішньому моніторингу.
 
-Стандартні unit-файли розраховані на `interval_seconds=30` і
-`scan_budget_seconds=60`. При значному збільшенні цих значень відповідно змініть
-`WatchdogSec`/`TimeoutStartSec`, інакше supervisor може перезапускати повільну,
-але працездатну перевірку.
+Стандартні unit-файли розраховані на `scan_budget_seconds=60`. Під час
+очікування між перевірками основний цикл продовжує надсилати watchdog heartbeat
+з інтервалом, розрахованим із `WATCHDOG_USEC`, щонайбільше 30 секунд. Тому
+довгий `interval_seconds`, наприклад 300, не спричиняє перезапуск у простої.
+Саме сканування та блокувальні операції залишаються під watchdog-контролем:
+при збільшенні `scan_budget_seconds` або тривалості startup відповідно
+налаштуйте `WatchdogSec`/`TimeoutStartSec`.
 
-Вебсервер, MTA, root-owned install, таймер, watchdog і реальна доставка листів
-не перевірялися в середовищі підготовки. Перед покладанням на монітор виконайте
-тести на цільовій машині та перевірте failure-сценарії.
+Deployment-тести запускають генератор і статичну перевірку unit-файлів у
+тимчасовому ізольованому дереві. Вони не встановлюють сервісів і не запускають
+живий `systemctl`. Вебсервер, MTA, root-owned install, працюючий таймер,
+watchdog і фактичну доставку листів перевірте окремо на цільовій машині.
 
 ## Оновлення після v1
 
@@ -290,10 +314,12 @@ state.db або справності Rust-бінарного файла. Він 
 - `src/daily.rs`, `publisher.rs`: щоденний блок, атомарна публікація, квитанція.
 - `src/baseline.rs`, `config.rs`: root-довірена область, політика, pinning.
 - `src/journal.rs`, `alerts.rs`, `monitor.rs`: стан, аудит, пошта, watcher і цикл.
-- `tests/regression.rs`: 40 Rust-тестів; `tests/cli_smoke.py`: наскрізні CLI-тести.
-- `tests/validate_artifacts.py`, `VERIFICATION.json`: окрема обмежена перевірка артефактів.
-- `deploy/`: інсталятор, systemd service/timer, supervisor mail helper.
-- `.github/workflows/ci.yml`: реальна збірка й запуск тестів у Linux CI.
+- `tests/regression.rs` та інші Rust test-targets: регресійні тести; `tests/cli_smoke.py`: наскрізні CLI-тести.
+- `tests/deploy_regression.py`: timezone, preflight та статична перевірка systemd.
+- `tests/validate_artifacts.py`: окрема обмежена перевірка артефактів і native probes.
+- `VERIFICATION.json`: фактично виконані локальні перевірки, їх час і provenance вихідного коду.
+- `deploy/`: інсталятор, systemd service/timer/path, timezone-generator, supervisor mail helper.
+- `scripts/check`: єдина команда локальних перевірок та актуальний загальний звіт.
 
 ## Календар і джерела
 

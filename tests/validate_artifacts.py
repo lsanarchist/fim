@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Artifact/native-primitives checks. NOT a replacement for cargo test or Rust compilation."""
+import argparse
 import ctypes
 import datetime
 import errno
@@ -22,6 +23,9 @@ def passed(name):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, help='Optional artifact/native-probe report; does not describe Rust test execution')
+    args = parser.parse_args()
     c = json.loads((ROOT / 'config.json').read_text())
     cargo = tomllib.loads((ROOT / 'Cargo.toml').read_text())
     assert cargo['package']['name'] == 'fim' and c['timezone'] == 'Europe/Bratislava'
@@ -39,7 +43,7 @@ def main():
     # Execute the actual schema strings embedded in Rust, not reconstructed schemas.
     for source in ('journal.rs', 'baseline.rs'):
         text = (ROOT / 'src' / source).read_text()
-        schemas = re.findall(r'execute_batch\("((?:[^"\\]|\\.)*)"\)', text, flags=re.S)
+        schemas = re.findall(r'execute_batch\(\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)', text, flags=re.S)
         assert schemas, source
         for schema in schemas:
             db.executescript(schema.replace('\\\n', ''))
@@ -105,20 +109,25 @@ def main():
     else:
         checks.append({'check': 'Native Linux syscall tests', 'status': 'not run', 'reason': 'Unsupported host'})
 
-    rust_tests = len(re.findall(r'#\[test\]', (ROOT / 'tests/regression.rs').read_text()))
+    rust_tests = {str(source.relative_to(ROOT)): len(re.findall(r'#\[test\]', source.read_text()))
+                  for source in sorted((ROOT / 'tests').glob('*.rs'))}
     report = {
+        'generated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'scope': 'Artifact checks and direct native/SQLite probes only; Rust execution is recorded separately by scripts/check.',
         'environment': {'platform': platform.platform(), 'python': platform.python_version(),
                         'rustc_available': shutil.which('rustc') is not None,
                         'cargo_available': shutil.which('cargo') is not None},
         'executed_checks': checks,
-        'rust_regression_tests_written': rust_tests,
-        'not_executed': ['Rust compilation/type checking', f'{rust_tests} Rust regression tests',
-                         'CLI smoke tests against compiled Rust binary', 'Clippy/rustfmt',
-                         'systemd deployment', 'Real email inbox delivery'],
+        'rust_regression_tests_written': sum(rust_tests.values()),
+        'rust_test_attributes_by_file': rust_tests,
+        'outside_scope': ['Rust compilation/type checking', 'Rust regression test execution',
+                          'CLI smoke tests against compiled Rust binary', 'Clippy/rustfmt',
+                          'systemd service execution', 'Real email inbox delivery'],
         'important': 'Native syscall and SQLite checks do not establish that the Rust program compiles or passes its tests.'
     }
-    out = ROOT / 'VERIFICATION.json'
-    out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 

@@ -1,8 +1,10 @@
 [Unit]
-Description=Daily page publication in Bratislava time
+Description=Daily page publication in the configured timezone
+OnFailure=fim-failure@%n.service
 
 [Timer]
-OnCalendar=*-*-* 00:00:00 Europe/Bratislava
+# OnCalendar is supplied by fim-page-generator from /opt/fim/config.json.
+# Without a valid generated schedule this timer deliberately refuses to start.
 AccuracySec=1s
 RandomizedDelaySec=0
 Persistent=true

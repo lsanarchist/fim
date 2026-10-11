@@ -1,0 +1,9 @@
+[Unit]
+Description=Reschedule the publisher when trusted configuration changes
+
+[Path]
+PathChanged=/opt/fim/config.json
+Unit=fim-config.service
+
+[Install]
+WantedBy=multi-user.target

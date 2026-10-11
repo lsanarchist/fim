@@ -26,11 +26,21 @@ pub struct Issue {
 }
 impl Issue {
     pub fn new(kind: &str, path: Option<&Path>, detail: impl Into<String>) -> Self {
-        Self { kind: kind.into(), path_hex: path.map(secure::path_key),
-            path: path.map(|p| format!("{p:?}")), detail: detail.into() }
+        Self {
+            kind: kind.into(),
+            path_hex: path.map(secure::path_key),
+            path: path.map(|p| format!("{p:?}")),
+            detail: detail.into(),
+        }
     }
     pub fn key(&self) -> String {
-        format!("{}:{}", self.kind, self.path_hex.as_deref().unwrap_or("@health"))
+        format!(
+            "{}:{}",
+            self.kind,
+            self.path_hex.as_deref().unwrap_or("@health")
+        )
     }
 }
-pub fn add(issues: &mut Issues, issue: Issue) { issues.insert(issue.key(), issue); }
+pub fn add(issues: &mut Issues, issue: Issue) {
+    issues.insert(issue.key(), issue);
+}
