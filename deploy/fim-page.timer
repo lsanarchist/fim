@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily page publication in Bratislava time
+
+[Timer]
+OnCalendar=*-*-* 00:00:00 Europe/Bratislava
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=fim-page.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,56 @@
+{
+  "environment": {
+    "platform": "Linux-6.18.44-x86_64-with-glibc2.41",
+    "python": "3.13.5",
+    "rustc_available": false,
+    "cargo_available": false
+  },
+  "executed_checks": [
+    {
+      "check": "Cargo.toml and config.json parse; configuration fields match Config",
+      "status": "passed"
+    },
+    {
+      "check": "Calendar: exactly all 366 month/day keys",
+      "status": "passed"
+    },
+    {
+      "check": "Template: unique token and daily markers",
+      "status": "passed"
+    },
+    {
+      "check": "Actual Rust-embedded SQLite schemas execute successfully",
+      "status": "passed"
+    },
+    {
+      "check": "SQLite outbox: failed attempt retained, successful submission marked",
+      "status": "passed"
+    },
+    {
+      "check": "Native Linux openat2: confined regular-file read",
+      "status": "passed"
+    },
+    {
+      "check": "Native Linux openat2: leaf/intermediate symlinks and parent escape rejected",
+      "status": "passed"
+    },
+    {
+      "check": "Native renameat2 RENAME_EXCHANGE preserves displaced file",
+      "status": "passed"
+    },
+    {
+      "check": "Native renameat2 RENAME_NOREPLACE refuses overwrite",
+      "status": "passed"
+    }
+  ],
+  "rust_regression_tests_written": 40,
+  "not_executed": [
+    "Rust compilation/type checking",
+    "40 Rust regression tests",
+    "CLI smoke tests against compiled Rust binary",
+    "Clippy/rustfmt",
+    "systemd deployment",
+    "Real email inbox delivery"
+  ],
+  "important": "Native syscall and SQLite checks do not establish that the Rust program compiles or passes its tests."
+}

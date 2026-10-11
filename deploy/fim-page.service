@@ -1,0 +1,14 @@
+[Unit]
+Description=Verify and publish the daily date/name-day block
+OnFailure=fim-failure@%n.service
+
+[Service]
+Type=oneshot
+User=fim
+Group=fim
+ExecStart=/opt/fim/fim /opt/fim/config.json page
+TimeoutStartSec=90
+UMask=0022
+ProtectSystem=full
+ProtectHome=true
+ReadOnlyPaths=/opt/fim

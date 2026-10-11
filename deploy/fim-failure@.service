@@ -1,0 +1,10 @@
+[Unit]
+Description=Independent startup/watchdog/publisher failure notification
+
+[Service]
+Type=oneshot
+User=fim
+Group=fim
+ExecStart=/usr/bin/python3 /opt/fim/failure_mail.py %i
+TimeoutStartSec=20
+KillMode=control-group

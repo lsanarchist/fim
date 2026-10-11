@@ -1,0 +1,8 @@
+/target/
+/baseline.db*
+/state/*
+!/state/.gitkeep
+/staging/*
+!/staging/.gitkeep
+/site/index.html
+__pycache__/

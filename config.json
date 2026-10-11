@@ -1,0 +1,22 @@
+{
+  "root": "site",
+  "database": "baseline.db",
+  "calendar": "namedays.json",
+  "template": "index.template.html",
+  "state_dir": "state",
+  "staging_dir": "staging",
+  "timezone": "Europe/Bratislava",
+  "interval_seconds": 30,
+  "midnight_grace_seconds": 60,
+  "sendmail": "/usr/sbin/sendmail",
+  "mail_from": "fim@example.com",
+  "mail_to": "admin@example.com",
+  "alert_timeout_seconds": 10,
+  "retry_seconds": 30,
+  "reminder_seconds": 3600,
+  "max_file_bytes": 1073741824,
+  "max_index_bytes": 1048576,
+  "max_entries": 100000,
+  "scan_budget_seconds": 60,
+  "log_max_bytes": 10485760
+}
