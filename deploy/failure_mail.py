@@ -8,14 +8,28 @@ import sys
 from email.message import EmailMessage
 from pathlib import Path
 
+CONFIG_LIMIT = 1024 * 1024
 
-def main() -> None:
-    config = json.loads(Path('/opt/fim/config.json').read_text(encoding='utf-8'))
+
+def load_config(path: Path) -> dict:
+    with path.open('rb') as handle:
+        content = handle.read(CONFIG_LIMIT + 1)
+    if len(content) > CONFIG_LIMIT:
+        raise ValueError('Configuration exceeds 1 MiB')
+    config = json.loads(content)
+    # Match the Rust application's config-relative path policy, including
+    # conventional sendmail alternatives symlinks. Never resolve via PATH.
+    transport = Path(os.path.abspath(path.parent / config['sendmail']))
+    config['sendmail'] = str(transport.resolve(strict=True))
+    return config
+
+
+def notify_failure(config_path: Path, unit: str) -> None:
+    config = load_config(config_path)
     mail = EmailMessage()
     mail['From'] = config['mail_from']
     mail['To'] = config['mail_to']
     mail['Subject'] = 'FIM SERVICE FAILURE'
-    unit = sys.argv[1] if len(sys.argv) > 1 else 'unknown'
     mail.set_content(f'FIM service failed: {unit}\nInspect systemctl status and journalctl.\n'
                      'This supervisor notification does not rely on the FIM baseline or outbox.\n')
     proc = subprocess.Popen([config['sendmail'], '-i', '-t'], stdin=subprocess.PIPE,
@@ -34,4 +48,4 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-    main()
+    notify_failure(Path('/opt/fim/config.json'), sys.argv[1] if len(sys.argv) > 1 else 'unknown')

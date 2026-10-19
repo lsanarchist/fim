@@ -157,9 +157,18 @@ pub fn worker(
         }
         while !stop.load(Ordering::Relaxed) {
             let result = deliver_mail(&ctx, &logger, &mut sender);
+            // A separate `deliver` process may have submitted the remaining mail
+            // while this worker was stopped. Do not keep a persisted transport
+            // incident alive until a future reminder happens to generate mail.
+            // An idle result alone is insufficient: failed batches in backoff,
+            // or a batch held by another sender, must retain their error state.
+            let recovered_elsewhere = matches!(result, Ok(false))
+                && health.lock().is_ok_and(|h| h.is_some())
+                && journal::queue_size(&ctx.c.state_dir).is_ok_and(|n| n == 0);
             if let Ok(mut h) = health.lock() {
                 match result {
                     Ok(true) => *h = None,
+                    Ok(false) if recovered_elsewhere => *h = None,
                     Ok(false) => {}
                     Err(ref e) => *h = Some(format!("{e:#}")),
                 }

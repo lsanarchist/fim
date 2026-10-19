@@ -1,7 +1,8 @@
 /target/
-/baseline.db*
+/baseline*.db*
 /state/*
 !/state/.gitkeep
+/state-v3/
 /staging/*
 !/staging/.gitkeep
 /site/index.html
