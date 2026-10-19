@@ -173,6 +173,30 @@ fn log_records(dir: &Path) -> Vec<Audit> {
     records
 }
 
+fn write_during_contention(logger: &Logger, audit: &Audit, deadline: Instant) {
+    loop {
+        if logger.write(audit) {
+            return;
+        }
+        // Production intentionally gives up a busy log lock before writing so
+        // the durable journal can retry later. These direct-logger concurrency
+        // tests exercise the same retry, without accepting any other I/O error
+        // or retrying a record that may already have reached the file.
+        assert_eq!(
+            logger.error().as_deref(),
+            Some("Timed out acquiring log lock"),
+            "unexpected log failure for {}",
+            audit.id
+        );
+        assert!(
+            Instant::now() < deadline,
+            "log writer exceeded its contention budget for {}",
+            audit.id
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn independently_created_loggers_write_complete_lines() {
     let f = Fixture::new();
@@ -183,8 +207,9 @@ fn independently_created_loggers_write_complete_lines() {
             let barrier = barrier.clone();
             thread::spawn(move || {
                 barrier.wait();
+                let deadline = Instant::now() + Duration::from_secs(30);
                 for n in 0..500 {
-                    assert!(logger.write(&event(format!("{worker}-{n}"))));
+                    write_during_contention(&logger, &event(format!("{worker}-{n}")), deadline);
                 }
             })
         })
@@ -242,8 +267,9 @@ fn subprocess_log_worker() {
     c.state_dir = PathBuf::from(state);
     c.log_max_bytes = max;
     let logger = Logger::new(&c);
+    let deadline = Instant::now() + Duration::from_secs(30);
     for n in 0..100 {
-        assert!(logger.write(&event(format!("process-{worker}-{n}"))));
+        write_during_contention(&logger, &event(format!("process-{worker}-{n}")), deadline);
     }
 }
 

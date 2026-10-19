@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,21 @@ def main():
         raise SystemExit(f'Build the Rust binary first: {BINARY}')
     with tempfile.TemporaryDirectory(prefix='fim-cli-') as td:
         p = Path(td)
+        version = tomllib.loads((PROJECT / 'Cargo.toml').read_text())['package']['version']
+        for options in (['--help'], ['-h'], ['--demo', '--help']):
+            result = subprocess.run([str(BINARY), *options], cwd=p, text=True,
+                                    capture_output=True, timeout=5)
+            assert result.returncode == 0 and 'Usage:' in result.stdout
+            assert 'check' in result.stdout and 'watch' in result.stdout
+        for flag in ('--version', '-V'):
+            result = subprocess.run([str(BINARY), flag], cwd=p, text=True,
+                                    capture_output=True, timeout=5)
+            assert result.returncode == 0 and result.stdout.strip() == f'fim {version}'
+        result = subprocess.run([str(BINARY), 'missing.json', 'typo'], cwd=p,
+                                text=True, capture_output=True, timeout=5)
+        assert result.returncode == 2 and 'Unknown command: typo' in result.stderr
+        assert not list(p.iterdir()), 'Help/version/invalid command must not create runtime files'
+        print('PASS CLI: help, version and command validation without configuration')
         setup(p)
         command(p, 'page')
         command(p, 'init')
@@ -75,6 +91,16 @@ def main():
         print('PASS CLI: recovery')
         command(p, 'init', 2)
         print('PASS CLI: baseline overwrite refusal')
+
+        stylesheet = p / 'site/style.css'
+        metadata = stylesheet.stat()
+        os.utime(stylesheet, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000))
+        command(p, 'check', 1)
+        assert any(e['kind'] == 'INCIDENT' and 'METADATA_CHANGED' in e['detail']
+                   and 'style.css' in e['detail'] for e in logs(p))
+        os.utime(stylesheet, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        command(p, 'check')
+        print('PASS CLI: timestamp-only mutation and metadata recovery')
 
         # Block the fake MTA for much longer than the configured mail deadline.
         (p / 'sendmail-test').write_text('#!/bin/sh\nsleep 30\n')

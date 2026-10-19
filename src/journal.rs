@@ -1,14 +1,15 @@
 //! File logging is best-effort, with a durable SQLite audit/outbox fallback.
 //! Incident state is independent of whether email submission succeeded.
 use crate::{config::Config, secure, Issues};
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     fs,
     io::Write,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -146,9 +147,26 @@ impl Logger {
 pub fn open_db(dir: &Path) -> Result<Connection> {
     secure::private_dir(dir)?;
     let path = dir.join("state.db");
-    // Private directory prevents an untrusted user racing SQLite's path open.
-    let _reservation = secure::runtime_file(&path)?;
-    let db = Connection::open(&path)?;
+    // Never open/close this inode outside SQLite. POSIX fcntl locks belong to
+    // the process: dropping a separate "reservation" FD can release SQLite's
+    // live locks and let another connection unlink an in-use WAL/shm file.
+    // The private directory prevents untrusted path replacement; NOFOLLOW
+    // additionally rejects a final-component symlink in SQLite's own open.
+    match fs::symlink_metadata(&path) {
+        Ok(meta) => ensure!(meta.is_file() && meta.nlink() == 1, "Unsafe state database"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let db = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    // SQLite creates inside the already-private directory; chmod does not
+    // acquire another file descriptor or disturb its advisory locks.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     db.busy_timeout(Duration::from_millis(200))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS active(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
@@ -352,7 +370,10 @@ pub fn replay_logs(dir: &Path, logger: &Logger) -> Result<()> {
     for (id, json) in rows {
         let event: Audit = serde_json::from_str(&json).context("Corrupt audit record")?;
         if !logger.write(&event) {
-            break;
+            anyhow::bail!(
+                "Audit replay blocked by log write failure for {id}: {}",
+                logger.error().unwrap_or_else(|| "unknown log error".into())
+            );
         }
         db.execute("UPDATE audit SET logged=1 WHERE id=?1", [id])?;
     }

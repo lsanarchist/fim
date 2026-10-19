@@ -143,12 +143,21 @@ pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
         );
     }
     let stop = Arc::new(AtomicBool::new(false));
-    let mail_health: alerts::MailHealth = Arc::new(Mutex::new(
-        j.active
-            .values()
-            .find(|i| i.kind == "MAIL_UNAVAILABLE")
-            .map(|i| i.detail.clone()),
-    ));
+    let previous_mail_error = j
+        .active
+        .values()
+        .find(|i| i.kind == "MAIL_UNAVAILABLE")
+        .map(|i| i.detail.clone());
+    // A standalone sender may have recovered the queue since the last run.
+    // Apply this to `check` as well: it has no worker to refresh mail health.
+    let previous_mail_error = if previous_mail_error.is_some()
+        && journal::queue_size(&ctx.c.state_dir).is_ok_and(|n| n == 0)
+    {
+        None
+    } else {
+        previous_mail_error
+    };
+    let mail_health: alerts::MailHealth = Arc::new(Mutex::new(previous_mail_error));
     let worker = if once {
         None
     } else {
@@ -215,6 +224,11 @@ pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
                 Err(e) => watch_error = Some(format!("{e:#}")),
             }
         }
+        // Keep replay corruption visible to the scanner, including one-shot
+        // checks. Leave the original forensic row intact for investigation.
+        let replay_error = journal::replay_logs(&ctx.c.state_dir, &j.logger)
+            .err()
+            .map(|e| format!("{e:#}"));
         let due = Instant::now() >= periodic
             || event_loss
             || debounce.is_some_and(|d| Instant::now() >= d);
@@ -230,7 +244,15 @@ pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
             let mut issues = if let Some(b) = &base {
                 scan::compare(&b.entries, &snapshot, &j.active)
             } else {
-                let mut i = j.active.clone();
+                // Without a baseline, retain the last-known path incidents.
+                // Operational health is measured again below; carrying it
+                // forward here would prevent repaired services from recovering.
+                let mut i: crate::Issues = j
+                    .active
+                    .iter()
+                    .filter(|(_, issue)| issue.path_hex.is_some())
+                    .map(|(key, issue)| (key.clone(), issue.clone()))
+                    .collect();
                 i.extend(snapshot.errors.clone());
                 i
             };
@@ -281,6 +303,12 @@ pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
             if let Some(e) = &j.storage_error {
                 add(&mut issues, Issue::new("STATE_IO", None, e.clone()));
             }
+            if let Some(e) = &replay_error {
+                add(
+                    &mut issues,
+                    Issue::new("AUDIT_REPLAY_FAILED", None, e.clone()),
+                );
+            }
             if j.dropped > 0 {
                 add(
                     &mut issues,
@@ -309,6 +337,7 @@ pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
                 );
             }
             if event_loss {
+                ever_incident = true;
                 j.emit("EVENT_LOSS","Event queue lost information; full rescan performed; transient history is unrecoverable",true);
             }
             let trackers = if event_loss {
@@ -372,7 +401,6 @@ pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
         if j.pending() > 0 || j.storage_error.is_some() {
             let _ = j.flush();
         }
-        let _ = journal::replay_logs(&ctx.c.state_dir, &j.logger);
         // Keep the supervisor informed while idle. This stays on the monitor
         // thread so a blocked scan cannot be concealed by a separate heartbeat.
         if Instant::now() >= next_watchdog {

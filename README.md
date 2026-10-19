@@ -1,64 +1,84 @@
-# Rust FIM v2 — Zadanie 1
+# Rust File Integrity Monitor
 
-Перероблена версія попереднього навчального проєкту. Один виконуваний файл,
-SQLite, SHA-256, JSON-конфігурація, файлові журнали та email через локальний
-sendmail-сумісний MTA. Без Tokio, вебінтерфейсу, зовнішнього сервера БД або
-мережевого API для іменин. Код розділено на невеликі модулі замість одного
-великого `main.rs`.
+A Linux command-line File Integrity Monitoring (FIM) project for a static website.
+It records a known-good baseline in SQLite, compares file contents and metadata,
+logs changes, and queues email alerts. Continuous inotify monitoring complements
+periodic SHA-256 scans. A separate publisher updates the website's date and Slovak
+name-day block without exempting the rest of the page from integrity checks.
 
-**Платформа:** Linux 5.6+ з `openat2`, локальна файлова система з inotify та
-`renameat2(RENAME_EXCHANGE)`, змонтований `/proc`. Нативний Windows не
-підтримується; для Windows використовуйте Linux VM або WSL2 і каталог у
-Linux-файловій системі, не `/mnt/c`.
+**Version:** 0.3.0. **Baseline schema:** 3; older baselines require an explicit,
+verified replacement. One Rust executable, JSON configuration, bundled SQLite,
+and a local sendmail-compatible mail transport. No external database server,
+Tokio runtime, web administration interface, or online name-day API is required.
 
-## Статус перевірки — прочитати перед використанням
+## Scope and lecture coverage
 
-Єдиний локальний запуск перевірок — `./scripts/check`: форматування, Rust-тести,
-Clippy з `-D warnings`, release-збірка, CLI-сценарії, ізольовані deployment-тести
-та перевірки артефактів. Cargo використовує збережений `Cargo.lock` і `--locked`.
-GitHub використовується для контролю версій; GitHub Actions не потрібні.
+The project implements the baseline → fingerprint → comparison → log/alert flow
+described in the supplied *File Integrity Monitoring* lecture. The lecture explains
+FIM concepts rather than prescribing this exact Rust architecture. The website
+publisher, protected state, durable outbox, and systemd deployment are project
+features built around those concepts.
 
-`VERIFICATION.json` містить час, команди й результати фактично виконаного
-локального запуску; його логи зберігаються в `target/check-logs/`. Окремі
-Python/ctypes та SQLite probes позначені власною областю перевірки й не
-видаються за виконання Rust-коду. `tests/validate_artifacts.py` сам по собі
-не переписує цей загальний звіт і не робить висновків про запуск Rust-тестів.
-
-Локальна збірка й статична перевірка systemd не підтверджують production-install,
-роботу живих сервісів або доставку листа до inbox; ці перевірки окремі.
-
-## Відповідність завданню
-
-| Вимога | Реалізація |
+| FIM topic | Implementation and scope |
 |---|---|
-| Конфігурація при запуску | JSON, перевірка типів, невідомих полів, шляхів і лімітів |
-| Логувальний файл | `state/fim.log`, JSON Lines, ротація до п'яти попередніх файлів |
-| Alert компетентній особі | Незалежний поштовий потік, персистентний SQLite outbox |
-| Baseline у базі | `baseline.db`: шляхи, SHA-256, тип об'єкта, mode, UID/GID |
-| Файли вебсайту | Рекурсивні перевірки + inotify-події, включно зі зміною і відновленням |
-| Дата та іменини опівночі | Довірений шаблон, точна валідація блоку, timezone, publisher і timer |
+| Known-good baseline | SQLite stores relative paths, SHA-256 fingerprints, object types, and metadata. Monitoring never updates the baseline automatically. |
+| File content | Full SHA-256 scans; only the exactly validated daily block of the root `index.html` is normalized. |
+| Attributes | Type, permission bits, UID and GID for files/directories; byte size and nanosecond modification time for ordinary files; creation/birth time when the filesystem exposes it. |
+| File count and location | Recursive baseline membership detects additions, deletions, empty directories, and moves. A move is reported as a removed path and an added path, not attributed to a user. |
+| Scheduled and continuous checking | `check` runs once; `watch` combines periodic scans with inotify events and recovery after watcher failure. |
+| Logging and alerts | Rotating JSON Lines log, SQLite audit fallback, persistent email outbox, retries, reminders, and recovery events. |
+| Legitimate dynamic content | A trusted local template/calendar, configured timezone, strict daily-block validation, and a separate midnight publisher. |
 
-Схема «відомий коректний baseline → цифрові відбитки → перевірка → журнали й
-попередження» відповідає наданій лекції FIM. Черга, системні виклики, політика
-нормалізації та supervisor — інженерні доповнення цього проєкту, не код із лекції.
+Directory size/timestamps change during ordinary child creation and are not stored
+as baseline attributes. The daily `index.html` also excludes raw size, modification
+time, and birth time: authorized daily replacement changes those values. Its
+normalized content, object type, permissions, and ownership remain checked.
+Creation time is optional; Unix `ctime` is **not** treated as creation time.
 
-## Локальний запуск для лабораторної
+This implementation does not record ACLs, extended attributes, full historical
+file contents, or the identity of the process/user that made a change. It does not
+promise protection against root, a compromised kernel, or the monitor's own UID.
+See [Security and operational limits](#security-and-operational-limits).
 
-Потрібні актуальний stable Rust/Cargo, C-компілятор для bundled SQLite, Linux,
-Python 3.11+ та системна база часових зон `tzdata`. Для повної статичної
-перевірки deployment потрібен `systemd-analyze`.
-Для реальної пошти потрібен налаштований локальний sendmail-сумісний сервіс.
-Вбудовані тести використовують його імітацію й не надсилають зовнішніх листів.
+## Requirements
+
+- Linux 5.6+ with `openat2`, a mounted `/proc`, and a local filesystem supporting
+  inotify and `renameat2(RENAME_EXCHANGE)`. Site and staging must be on the same
+  filesystem for publication.
+- Rust 1.85+ with Cargo, rustfmt, and Clippy; a C compiler for bundled SQLite.
+  Dependencies are pinned by the committed `Cargo.lock`.
+- Python 3.11+ and the system IANA timezone database (`tzdata`) for the checks and
+  deployment helpers. Full static deployment verification needs `systemd-analyze`.
+- A configured local sendmail-compatible MTA for real notifications. The installer
+  does not install or configure an MTA. Automated tests use local fake transports.
+
+Native Windows is unsupported. Use a Linux VM or WSL2 with the project on its
+Linux filesystem, rather than `/mnt/c`. NFS, FUSE, and arbitrary remote or
+unreliable filesystems are outside the intended deployment environment.
+
+## Quick start for a local lab
+
+Run these commands from a fresh checkout. If a previous baseline already exists,
+follow [Upgrading an existing installation](#upgrading-an-existing-installation).
 
 ```sh
+git clone https://github.com/lsanarchist/fim.git
+cd fim
+
 ./scripts/check
+./target/release/fim --help
 
 mkdir -p state staging
 chmod 700 state staging
+```
 
-# У config.json встановіть реальні mail_from, mail_to та шлях sendmail.
+Edit `config.json`: set `mail_from`, `mail_to`, and the path to your working
+`sendmail` executable. The sample addresses are placeholders. Test the transport
+before relying on it:
+
+```sh
 ./target/release/fim --demo config.json alert-test
-# Перевірте, що тестовий лист дійсно отримано.
+# Confirm that the test message actually arrived in the intended inbox.
 
 ./target/release/fim --demo config.json page
 ./target/release/fim --demo config.json init
@@ -66,267 +86,372 @@ chmod 700 state staging
 ./target/release/fim --demo config.json watch
 ```
 
-**`--demo` вимикає перевірки root-власності довірених файлів/каталогів.** Це
-зручність для локального заняття під одним користувачем, а не безпечний режим
-вебсервера. Обмеження шляхів через `openat2`, перевірки типів і приватні
-`state/` та `staging/` залишаються активними.
+`page` creates the initial trusted page; `init` records the current verified tree.
+Use Ctrl+C to stop `watch`. The sample interval is 30 seconds, and filesystem
+events can prompt a scan before the next periodic deadline.
 
-Відносні шляхи рахуються від каталогу конфігурації. `TZ` у shell не потрібний:
-програма явно використовує `timezone` з конфігурації.
+**`--demo` relaxes root-ownership checks for trusted files and their ancestors.**
+It is intended for a single-user lab, not a web server deployment. Path
+confinement, object-type checks, and private `state/` and `staging/` permissions
+still apply. Relative config paths are resolved against the configuration file's
+directory; a shell `TZ` variable is unnecessary because `timezone` is explicit.
 
-`check`: код 0 — поточна перевірка без зафіксованих інцидентів/виявлених відмов;
-1 — інцидент або виявлена операційна відмова; 2 — помилка запуску. Під час
-одного `check` виконується не більше однієї обмеженої спроби відправлення батча;
-інші батчі залишаються в outbox. Команда `deliver` обробляє один готовий батч.
-`watch` обслуговує чергу постійно. Для одного `state_dir` допускається тільки
-один процес `watch`/`check`; `page` працює паралельно через окреме блокування.
+### Demonstrate an incident and recovery
 
-Тест зміни:
+With `watch` running, open another terminal in the checkout:
 
 ```sh
-printf '\n/* changed */\n' >> site/style.css
+# Keep a trusted copy, including the original modification time and permissions.
+cp --preserve=all site/style.css state/style.css.trusted-copy
+printf '\n/* FIM demonstration change */\n' >> site/style.css
+tail -n 10 state/fim.log
+
+# Restore the existing file in place and preserve its recorded metadata.
+cp --preserve=all state/style.css.trusted-copy site/style.css
+tail -n 10 state/fim.log
 ```
 
-Не створюйте новий baseline, щоб прибрати тривогу. Відновіть довірений оригінал.
-Зміна прав чи власника також є інцидентом: відновлення лише байтів цього не виправить.
+Allow time for each scan, or stop `watch` and run `check` explicitly. Inspect the
+`INCIDENT`, `FS_ACTIVITY`, and `RECOVERED` records and the alert outbox/deliveries.
+A changed file normally causes `check` to return 1. Restoring just the bytes can
+leave `METADATA_CHANGED` active because modification time is also monitored.
+Replacing an inode can change its birth time, which ordinary restore commands
+cannot necessarily reproduce.
 
-## Що змінено порівняно з v1
+Do not recreate the baseline merely to silence an incident. Restore a trusted
+original and its monitored metadata, or investigate and explicitly approve a new
+known-good baseline. A file changed and immediately restored while `watch` is
+active can still produce an `FS_ACTIVITY` alert.
 
-### Незалежні результати для кожного файла
+## Command reference
 
-Пошкоджений `index.html`, symlink, завеликий файл чи помилка читання не
-скасовують результати для інших файлів. Некоректний щоденний блок має окремий
-`DAILY_INVALID`; для нього також зберігається відбиток сирих байтів, тому
-подальші підміни вже пошкодженої сторінки не зливаються в одну незмінну помилку.
+```text
+fim [--demo] <config.json> <page|init|check|watch|alert-test|deliver>
+fim --help
+fim --version
+```
 
-Неперевірені піддерева позначаються як unknown. Їх не видають за видалені,
-і попередні інциденти в них не оголошують усуненими без нової перевірки.
+`-h` and `-V` are also supported. Help and version do not require a configuration
+file and can follow `--demo`.
 
-### Пошта не виконується в циклі сканування
+| Command | Behavior |
+|---|---|
+| `page` | Create the first page, or verify and publish the allowed daily update. It preserves the displaced page for verification. |
+| `init` | Create a new baseline from a complete, valid tree. An existing baseline is never overwritten. |
+| `check` | Run one integrity check and at most one bounded attempt to submit a due email batch. Other batches remain queued. |
+| `watch` | Monitor continuously, periodically rescan, process filesystem events, and service the outbox independently. |
+| `alert-test` | Queue a test notification and attempt one due batch. An older due batch or busy worker can take precedence; verify the inbox. |
+| `deliver` | Attempt one due outbox batch without requiring a healthy website, calendar, or template. Print the remaining pending batch count. |
 
-Поштовий потік бере події з окремого `state.db`. Невдала спроба залишається
-в outbox; повтори мають експоненційне відтермінування до години. Стан інциденту
-зберігається окремо від стану відправлення, тому `RECOVERED` не залежить від
-того, чи вдалося надіслати попередній лист. Для активних інцидентів є нагадування.
+For `check`, exit code **0** means the current check found no incidents or detected
+operational failures; **1** means an incident or detected operational failure;
+**2** means startup/command failure. A zero exit status from mail commands is not
+proof of inbox delivery. Only one `watch`/`check` process may use a given
+`state_dir`; `page` uses a separate lock and can run alongside the monitor.
 
-Повідомлення подається MTA через звичайний тимчасовий файл, а не потенційно
-блокувальний запис у stdin-pipe. Після таймауту завершується створена для MTA
-група процесів. Якщо вбитий процес ще не може завершитися через стан ядра,
-воркер не створює нескінченно нові процеси; сканер працює незалежно.
+## Configuration reference
 
-Гарантія черги — **at-least-once передавання локальному MTA**, не exactly-once
-і не доставка до inbox. Аварія після прийняття MTA, але до запису підтвердження
-в SQLite, може дати дублікат. `ALERT_QUEUED` не означає, що людина прочитала лист.
+All fields in [`config.json`](config.json) are required. Unknown fields, invalid
+types, unsafe path overlaps, and out-of-range values are rejected at startup.
+Trusted configuration input is limited to 1 MiB. Paths are resolved against the
+configuration directory, including a relative `sendmail` path.
 
-### Baseline і контрольні дані не беруться на довіру заново щосканування
+### Paths and daily policy
 
-У серверному режимі конфігурація, baseline, календар, шаблон, executable та їхні
-довірені батьківські каталоги мають належати root і не бути доступними на запис
-групі/іншим. Приватні робочі каталоги мають mode 0700 і належать користувачу FIM.
-Вони та службові файли не можуть перетинатися з публічним деревом.
+| Field | Sample default | Meaning |
+|---|---|---|
+| `root` | `site` | Public website tree to scan recursively. Filesystem root itself is unsupported. |
+| `database` | `baseline.db` | Trusted baseline database. `init` creates it once. |
+| `calendar` | `namedays.json` | Trusted local calendar with exactly all 366 `MM-DD` keys. |
+| `template` | `index.template.html` | Trusted UTF-8 HTML template with one `{{DAILY}}` token and one pair of daily markers. |
+| `state_dir` | `state` | Private runtime directory for `state.db`, JSONL logs, locks, and the publication receipt. |
+| `staging_dir` | `staging` | Private directory for prepared/displaced pages; must support exchange with the public root. |
+| `timezone` | `Europe/Bratislava` | IANA timezone for page dates, validation, and the generated midnight timer. |
+| `midnight_grace_seconds` | `60` | Accept the exact previous day's block for this many seconds after midnight; range 0–300. |
 
-Baseline завантажується один раз; сканер порівнює з копією в пам'яті. SQLite
-розбирає приватний тимчасовий знімок саме перевірених байтів, а не повторно
-відкриває змінюваний шлях baseline. Завантаження потребує доступного `state_dir`
-і місця для цього знімка; його помилка не маскується як чиста перевірка. SHA-256
-і права довірених файлів перевіряються повторно. Зміна файла baseline на диску
-не змінює вже завантаженого еталона: вона створює `TRUST_CHANGED`. Baseline також
-прив'язаний до відбитків календаря, шаблону та до timezone.
+Public and private paths must be disjoint; private paths must not overlap one
+another. `state_dir` and `staging_dir` must exist, be private (mode 0700), and be
+owned by the process user; root may administer them. Production trusted files
+and their ancestors must be root-owned and protected against group/other writes.
 
-Це захист через окрему root-довірену область і pinning, **не цифровий підпис**.
-Код не обіцяє захисту від root або скомпрометованого облікового запису монітора.
+### Scanning and logging
 
-### Безпечніші операції з файлами
+| Field | Sample default | Meaning and accepted range |
+|---|---|---|
+| `interval_seconds` | `30` | Target interval between periodic scan starts; 1–86,400 seconds. |
+| `max_file_bytes` | `1073741824` | Maximum ordinary file size; from `max_index_bytes` through 1,099,511,627,776 bytes (1 TiB). |
+| `max_index_bytes` | `1048576` | Maximum template/rendered `index.html` size; 1,024–16,777,216 bytes. |
+| `max_entries` | `100000` | Maximum baseline/scan entry count; 1–1,000,000. Includes directories. |
+| `scan_budget_seconds` | `60` | Userspace budget for a full scan; 1–300 seconds. Coordinate with systemd watchdog timeouts. |
+| `log_max_bytes` | `10485760` | Rotate `fim.log` at this size; minimum 65,536 bytes. Keep up to five previous files. |
 
-Файли відкриваються від дескриптора кореневого каталогу через `openat2` з
-`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV`. Немає непомітного
-fallback до небезпечного звичайного відкриття, коли ці механізми недоступні.
+Files are hashed in 64 KiB blocks; the daily page has its own bounded in-memory
+read. Each ordinary file also has a five-second userspace read budget. Exceeding
+a budget or limit means incomplete coverage, not a clean result. A userspace
+deadline cannot interrupt a system call stuck in the kernel.
 
-Хешується відкритий дескриптор. Статистики до/після читання та поточна
-ідентичність шляху перевіряються на конкурентні зміни. Symlink, hardlink,
-FIFO, сокети й пристрої не приймаються як нормальні файли. Шляхи з не-UTF-8
-байтами кодуються без втрат у hex. Директорії, включно з порожніми, теж входять
-до baseline; порівнюються тип, UID, GID та біти прав.
+### Mail and reminders
 
-Це не атомарний snapshot усього дерева. Зміна під час перевірки дає непевний
-результат/інцидент, а не підтвердження чистоти. ACL/xattrs, повний історичний
-вміст і особа процесу-змінювача до цієї реалізації не входять. mtime/ctime
-використовуються для виявлення гонок під час читання, але не як baseline-поля,
-які мають назавжди залишатися незмінними.
+| Field | Sample default | Meaning and accepted range |
+|---|---|---|
+| `sendmail` | `/usr/sbin/sendmail` | Local sendmail-compatible executable. Root-controlled alternatives symlinks are resolved. |
+| `mail_from` | `fim@example.com` | Valid sender mailbox; replace the placeholder. |
+| `mail_to` | `admin@example.com` | Valid responsible recipient mailbox; replace the placeholder. |
+| `alert_timeout_seconds` | `10` | Timeout for a local MTA attempt; 1–60 seconds. |
+| `retry_seconds` | `30` | Initial retry delay; 1–3,600 seconds. Failures back off exponentially, capped at one hour. |
+| `reminder_seconds` | `3600` | Reminder interval for active incidents; 60–31,536,000 seconds. |
 
-### Опівнічний publisher без непомітного знищення підміни
+The monitor loads and pins its configuration at startup. Editing it is not an
+automatic in-process reload: restart `fim.service` after a deliberate change.
+The config path unit only regenerates the publisher schedule. Changes to the
+calendar, template, or timezone also affect baseline policy and require explicit
+administration of the trusted reference.
 
-`index.html` має один блок:
+## How monitoring and publication work
+
+### Independent scan results
+
+One damaged page, unreadable file, symlink, oversized object, or failed directory
+does not discard results for unrelated files. An invalid daily block gets
+`DAILY_INVALID` and a fingerprint of its raw bytes, so a second malicious edit
+to an already-invalid page is still distinguishable.
+
+Unverified subtrees are marked **unknown**. Their entries are not reported as
+deleted, and prior incidents are not declared recovered without a new verified
+observation. Directory changes during or after enumeration invalidate coverage
+for the affected subtree. Content, size, ownership, permissions, and monitored timestamps are
+compared separately so an unchanged content hash does not hide an attribute edit.
+
+### Durable audit and email
+
+`state_dir/fim.log` is a rotating JSON Lines log. SQLite stores active incidents,
+audit records, and the persistent outbox separately from the trusted baseline.
+Failure to write the JSONL log does not stop scanning: audit records can be
+replayed from SQLite when logging recovers. Concurrent processes share a stable
+`fim.log.lock` for writing and rotation. A partial log write triggers a best-effort
+rollback to the previous file length; rollback failure is reported separately.
+Corrupt/unreadable replay records produce `AUDIT_REPLAY_FAILED` without deleting
+the original evidence, and `check` reports failure until replay recovers.
+Runtime database files are opened through SQLite itself, with path/type checks
+and `SQLITE_OPEN_NOFOLLOW`. Avoiding unrelated open/close operations on a live
+database preserves SQLite's process-level file locks and cross-process coherence.
+
+The mail worker runs independently of the scan loop. Failed attempts remain
+queued; incident recovery does not depend on successful delivery of the original
+alert. MTA stdin uses a regular temporary file to avoid blocking the scanner on
+a pipe. Timeouts terminate the MTA process group; an unreaped stuck child does
+not lead to an unbounded stream of replacement processes.
+If a separate `deliver` process drains the outbox, a stale mail failure can clear;
+pending batches still in backoff do not count as recovered mail transport.
+
+The outbox provides **at-least-once submission to the local MTA**, not exactly-once
+delivery or proof of inbox receipt. A crash between MTA acceptance and SQLite
+acknowledgement can produce a duplicate. `ALERT_QUEUED` means queued, not read.
+
+### Daily page handling
+
+The root page contains exactly one block, for example:
 
 ```html
 <!-- FIM:daily -->Dátum: 2026-09-28. Meniny: Václav.<!-- /FIM:daily -->
 ```
 
-Лише після точної перевірки значення весь блок нормалізується до `{{DAILY}}`.
-Решта HTML залишається під SHA-256. Час береться безпосередньо перед і після
-читання саме `index.html`, тому початок обходу до опівночі більше не визначає
-дату для всіх наступних файлів. Обидві дати дозволяються лише коли саме читання
-перетнуло межу доби. Grace-вікно приймає виключно правильне повне вчорашнє значення.
+Only after exact date/name validation is that block normalized to `{{DAILY}}`.
+Everything else remains under SHA-256. The allowed date is evaluated immediately
+before and after reading `index.html`; both dates are accepted only when that
+read itself crosses midnight. The grace window accepts the exact complete
+previous-day value, not arbitrary content written near midnight.
 
-`page` перевіряє старий файл, створює новий у приватному staging і виконує
-`RENAME_EXCHANGE`. Потім перевіряється **фактичний витіснений файл**, а не лише
-те, що було прочитано до заміни. Якщо він відрізняється байтами, ідентичністю
-чи правами, реєструється помилка, а об'єкт зберігається як `candidate-*` для
-розслідування. Немає сліпого rollback, який міг би знищити наступну підміну.
-Коректні попередні версії мають префікс `verified-*`; зберігаються останні сім.
+The publisher validates the existing page, prepares a new page in private staging,
+and uses `RENAME_EXCHANGE`. It then verifies the **actual displaced object** for
+content, identity, and metadata. An unexpected object is retained as `candidate-*`
+and reported; there is no blind rollback that could destroy a later replacement.
+Verified old pages use `verified-*`, with the latest seven retained.
 
-Важлива межа: це виявлення гонки та збереження витісненого об'єкта, а не
-обіцянка атомарної операції «перевірив і тільки тоді замінив» щодо чужих
-паралельних записів. Під час такої гонки нова довірена сторінка вже могла бути
-опублікована, перш ніж перевірка витісненого об'єкта завершилася помилкою.
-Локальна збережена копія також не є криптографічно незмінним forensic-архівом.
+Authorized inotify publication events require a protected receipt, a verified
+current page, and paired rename cookies connecting the specific staging file to
+`index.html`. Ordinary data/metadata writes are not authorized by a nearby legal
+update. Missing pairs, late receipts, and event loss are handled conservatively.
 
-Після пропуску понад одного дня publisher навмисно відмовляється автоматично
-виправляти стару сторінку: адміністратор має перевірити ситуацію й відновити
-коректний поточний блок без перестворення baseline.
+After more than one missed day, the publisher deliberately refuses to repair a
+stale page automatically. Review the cause and restore the correct current block
+from trusted inputs; do not recreate the baseline to bypass that review.
 
-### Короткочасні зміни, пропуски подій і продуктивність
+## Server deployment
 
-Inotify-події зберігаються й потрапляють до алертів **навіть коли наступний хеш
-знову збігається з baseline**. Наприклад, зміна `style.css` і негайне повернення
-оригіналу залишають `FS_ACTIVITY`, а не лише чисту наступну перевірку.
-
-Легальна публікація не дозволяє довільні записи «опівночі». Для неї потрібні
-захищена квитанція publisher, перевірений поточний файл і **парні rename-cookie**,
-що пов'язують конкретний приватний staging-файл з `index.html`. Звичайний
-Data/Metadata-запис не авторизується навіть поряд із легальним оновленням.
-Неповні пари, запізніла квитанція або втрата подій трактуються консервативно:
-можливе зайве попередження, але не мовчазна авторизація.
-
-Переповнення ядрової/прикладної черги дає `EVENT_LOSS` і повний rescan.
-Недоступність watcher дає окремий інцидент, повторне підключення та продовження
-періодичних перевірок. **Rescan не відновлює історію вже втрачених короткочасних
-подій.** NFS, FUSE, збої ядра та довільні ненадійні файлові системи не є цільовим
-режимом цієї реалізації.
-
-Звичайні файли хешуються блоками 64 KiB. Для `index.html` є окремий ліміт
-розміру. Є ліміти числа об'єктів, розміру, загального обходу та п'ятисекундний
-userspace-бюджет читання одного файла. Вичерпання ліміту не означає «чисто»:
-покриття позначається неповним. Системний виклик, що завис у ядрі, таким
-userspace-бюджетом не переривається — для цього потрібен supervisor/watchdog.
-
-Повний SHA-256 навмисно не підмінений кешем лише за mtime/size. Обхід усе ще
-O(загальний обсяг прочитаних даних); великий сайт або потік записів потребує
-підбору лімітів і вимірювання навантаження. Інтервал — ціль початку перевірок,
-не гарантований максимальний час виявлення. Перевищення дає `SCAN_OVERRUN`.
-
-### Відмови журналу й сховища
-
-Помилка запису `fim.log` більше не завершує сканер. Аудит має резерв у SQLite,
-а непереписані записи можуть бути відтворені в лог після відновлення. За
-недоступності БД є обмежений RAM-буфер; stderr потрапляє до journald при systemd.
-
-Запис JSONL і ротація використовують спільне міжпроцесне блокування;
-стабільний lock-файл — `state_dir/fim.log.lock`. Паралельні `watch`, `page`
-і `deliver` не перемішують частини рядків.
-Якщо запис завершується помилкою після частини JSON-рядка, логер під тим самим
-lock намагається відновити попередню довжину файла; помилка відновлення теж
-потрапляє до fallback-діагностики.
-Під час масового reconcile аудит скидається в SQLite пакетами, тому справна
-БД не спричиняє втрату подій через обмеження резервного RAM-буфера.
-
-За одночасної відмови диска, БД, stderr/журналювання та каналу сповіщення
-гарантувати збереження всіх подій неможливо. RAM-буфер обмежений 4096 подіями;
-його переповнення явно сигналізується як `AUDIT_LOSS`. Pending-листи та
-непереписаний аудит не видаляються заради ліміту — тривала відмова пошти
-вимагає контролю вільного місця. Потрібне зовнішнє спостереження за сервісом.
-
-## Розгортання на сервері
-
-Готові шаблони призначені для Debian/Ubuntu з systemd і локальним MTA, наприклад
-Postfix. Сам інсталяційний скрипт **не встановлює й не конфігурує поштовий сервер**.
-Дозволи MTA та його роботу саме під service-user необхідно перевірити окремо.
-Шаблон свідомо не вмикає `NoNewPrivileges=true`, який може завадити потрібному
-setgid-helper локальної пошти.
+The provided templates target a fresh Debian/Ubuntu systemd installation with a
+working local MTA, such as Postfix. Run the build/checks as your ordinary user.
 
 ```sh
 ./scripts/check
 sudo ./deploy/install.sh
 sudoedit /opt/fim/config.json
-# Після початкового редагування config і перед першим запуском timer:
-sudo systemctl daemon-reload
 
+# Apply the configured timezone after the initial edit.
+sudo systemctl daemon-reload
 sudo -u fim /opt/fim/fim /opt/fim/config.json alert-test
-# Переконайтеся, що тестовий лист надійшов.
+# Verify actual receipt before depending on alerts.
 
 sudo -u fim /opt/fim/fim /opt/fim/config.json page
 sudo /opt/fim/fim /opt/fim/config.json init
 sudo systemctl enable --now fim-config.path fim.service fim-page.timer
 ```
 
-Вебсервер має публікувати **лише `/var/www/fim/site`**. `www-data` не повинен
-бути власником службових файлів, членом групи `fim` чи мати доступ на запис
-до конфігурації, baseline, staging або state. Не запускайте серверний режим
-із `--demo`.
+The installer checks all required inputs and the IANA timezone before mutation.
+It refuses existing installation roots (`/opt/fim`, `/var/lib/fim`,
+`/var/www/fim`), destination unit files, and the generator target, including broken
+symlinks. This includes partial installations; it is not an upgrade installer.
+The preflight is not a transaction against concurrent root changes, and its
+timezone check does not replace the application's full startup validation.
 
-Конфігурація/бінарний файл/baseline/календар/шаблон — root-owned. Монітор і
-publisher запускаються під окремим від вебсервера користувачем `fim`, але
-**між собою використовують один UID**. Для монітора systemd робить каталог сайту
-read-only; publisher працює в іншому service namespace. Це не ізоляція від
-компрометації самого UID `fim`.
+Configure the web server to publish **only `/var/www/fim/site`**. The web-server
+account (for example `www-data`) must not own trusted/runtime files, belong to the
+`fim` group, or have write access to configuration, baseline, state, or staging.
+Never use `--demo` for this deployment.
 
-Інсталятор спочатку перевіряє наявність усіх вхідних файлів, зокрема
-`site/style.css`, та валідність IANA timezone. Відмова цього preflight не
-створює користувача, каталоги або файли інсталяції.
+| Location or component | Ownership and role |
+|---|---|
+| `/opt/fim` executable, config, baseline, calendar, template | Root-owned trust area. |
+| `/var/lib/fim` | Private runtime state owned by `fim`, mode 0700. |
+| `/var/www/fim/site` | Published tree owned by `fim`; exposed read-only to the monitor by systemd. |
+| `/var/www/fim/staging` | Private publisher workspace owned by `fim`, mode 0700. |
+| `fim.service` | Continuous monitor, independent mail worker, watchdog and restart policy. |
+| `fim-page.timer` / `fim-page.service` | Midnight publisher in the configured timezone. |
+| `fim-config.path` / `fim-config.service` | Regenerate and restart the timer after configuration changes. |
+| `fim-failure@.service` | Independent Python failure notification for startup, watchdog, or publisher failure. |
 
-Systemd-generator створює `OnCalendar` для опівночі саме в `timezone` з
-`/opt/fim/config.json` при boot/`daemon-reload`. `fim-config.path` відстежує
-подальші зміни конфігурації й перегенеровує та перезапускає timer; за
-некоректної timezone розклад вимикається з помилкою. Якщо path-unit вимкнений,
-після редагування виконайте `sudo systemctl daemon-reload` та
-`sudo systemctl restart fim-page.timer` вручну. Зміна timezone також змінює
-прив'язану до baseline політику й потребує свідомого адміністрування еталона
-на перевіреному сайті; автоматичного оновлення baseline немає.
+The monitor and publisher share the `fim` UID but run in separate service mount
+namespaces. The monitor sees the site as read-only. This is not a security boundary
+against compromise of the shared UID. The templates deliberately do not set
+`NoNewPrivileges=true`, because the selected MTA may require a setgid helper such
+as Postfix `postdrop`; test mail delivery under the actual service user.
 
-Watchdog реагує, якщо основний цикл перестає завершувати
-перевірки. `OnFailure` має окремий Python-helper, який не залежить від baseline,
-state.db або справності Rust-бінарного файла. Він усе ще потребує читабельної
-конфігурації і працездатного MTA; це не заміна незалежному зовнішньому моніторингу.
+### Timers, watchdog, and operational checks
 
-Стандартні unit-файли розраховані на `scan_budget_seconds=60`. Під час
-очікування між перевірками основний цикл продовжує надсилати watchdog heartbeat
-з інтервалом, розрахованим із `WATCHDOG_USEC`, щонайбільше 30 секунд. Тому
-довгий `interval_seconds`, наприклад 300, не спричиняє перезапуск у простої.
-Саме сканування та блокувальні операції залишаються під watchdog-контролем:
-при збільшенні `scan_budget_seconds` або тривалості startup відповідно
-налаштуйте `WatchdogSec`/`TimeoutStartSec`.
+The systemd generator builds midnight `OnCalendar` from `/opt/fim/config.json` at
+boot and `daemon-reload`. Invalid timezone configuration removes the schedule and
+fails visibly instead of falling back to host time. If `fim-config.path` is
+disabled, run `systemctl daemon-reload` and `systemctl restart fim-page.timer`
+manually after editing. Changing timezone also changes baseline policy.
 
-Deployment-тести запускають генератор і статичну перевірку unit-файлів у
-тимчасовому ізольованому дереві. Вони не встановлюють сервісів і не запускають
-живий `systemctl`. Вебсервер, MTA, root-owned install, працюючий таймер,
-watchdog і фактичну доставку листів перевірте окремо на цільовій машині.
+```sh
+sudo systemctl status fim.service fim-page.timer fim-config.path
+sudo systemctl list-timers fim-page.timer
+sudo journalctl -u fim.service -u fim-page.service -u fim-config.service
+sudo tail -n 20 /var/lib/fim/fim.log
+```
 
-## Оновлення після v1
+The default service has `WatchdogSec=120` and `TimeoutStartSec=120`, intended for
+the sample 60-second scan budget. Idle waits keep sending heartbeat messages at
+an interval derived from `WATCHDOG_USEC`, no longer than 30 seconds, so a long
+scan interval alone does not trigger a restart. Scanning and blocking operations
+remain subject to the watchdog; increase service timeouts deliberately if a larger
+scan budget or startup duration requires them.
 
-Схема baseline змінилася. **Немає автоматичної міграції або автоматичного
-перестворення еталона.** Збережіть попередню БД/журнали, перевірте сайт,
-заведіть окремий новий `state_dir` і створіть v2-baseline на відомому коректному
-стані. Попередні підозрілі зміни не мають ставати новою нормою лише через апгрейд.
+The Python failure notifier works without the Rust executable, baseline, or
+`state.db`. It still needs readable configuration and a working MTA. It bounds
+configuration reads to 1 MiB and resolves relative mail paths against the config
+directory, consistently with the application. It is not a substitute for external
+service monitoring.
 
-## Структура
+## Security and operational limits
 
-- `src/scan.rs`, `secure.rs`: незалежний обхід, SHA-256, метадані, Linux-операції.
-- `src/daily.rs`, `publisher.rs`: щоденний блок, атомарна публікація, квитанція.
-- `src/baseline.rs`, `config.rs`: root-довірена область, політика, pinning.
-- `src/journal.rs`, `alerts.rs`, `monitor.rs`: стан, аудит, пошта, watcher і цикл.
-- `tests/regression.rs` та інші Rust test-targets: регресійні тести; `tests/cli_smoke.py`: наскрізні CLI-тести.
-- `tests/deploy_regression.py`: timezone, preflight та статична перевірка systemd.
-- `tests/validate_artifacts.py`: окрема обмежена перевірка артефактів і native probes.
-- `VERIFICATION.json`: фактично виконані локальні перевірки, їх час і provenance вихідного коду.
-- `deploy/`: інсталятор, systemd service/timer/path, timezone-generator, supervisor mail helper.
-- `scripts/check`: єдина команда локальних перевірок та актуальний загальний звіт.
+- **Protected reference data:** production trust files and their ancestors are
+  root-owned and not writable by group/others. Baseline and policy are loaded once
+  into memory. SQLite parses a private snapshot of the exact verified baseline
+  bytes; loading requires writable state storage and sufficient free space.
+  Repeated digest/permission guards report `TRUST_CHANGED` without adopting a
+  changed on-disk reference. This is ownership-based protection and pinning, not
+  a digital signature.
+- **Confined reads:** `openat2` uses `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+  RESOLVE_NO_XDEV` with no unsafe fallback. Files are hashed through open
+  descriptors and checked for concurrent metadata/path changes. Symlinks,
+  hardlinked files, FIFOs, sockets, and devices are not accepted as normal files.
+  Non-UTF-8 paths are stored losslessly using hex encoding.
+- **No global snapshot:** concurrent changes can make coverage unknown or produce
+  an incident. The scan is not an atomic snapshot of the whole tree. Publisher
+  exchange detects races and preserves displaced objects, but the new page may
+  already be published when post-exchange verification fails. Stored candidates
+  are not a cryptographically immutable forensic archive.
+- **Event history has limits:** observed transient changes remain alertable even
+  when a later hash matches. Kernel/application queue overflow produces
+  `EVENT_LOSS` and a rescan; watcher failure is separately reported and retried
+  while periodic checking continues. A rescan cannot reconstruct already-lost
+  short-lived events. Monitoring cannot report events that occurred before it
+  started solely from an unchanged final tree.
+- **Bounded failure handling:** audit buffering is limited to 4,096 RAM events
+  when storage is unavailable; overflow reports `AUDIT_LOSS`. Healthy SQLite is
+  flushed in batches during large reconciliations. Pending mail and unreplayed
+  audit are not deleted just to enforce a storage cap; prolonged failure needs
+  disk-space monitoring. Simultaneous failure of storage, stderr/journald, and
+  notification cannot guarantee preservation of every event.
+- **Resource cost:** ordinary files are fully hashed; mtime/size are not used as
+  a shortcut around content checking. Each scan remains proportional to the data
+  read. Limits and a supervisor bound some failure modes, but a syscall blocked
+  in the kernel is not interrupted by a userspace read budget. The interval is a
+  scheduling target, not a guaranteed maximum detection delay; overrun produces
+  `SCAN_OVERRUN`.
 
-## Календар і джерела
+## Upgrading an existing installation
 
-`namedays.json` скопійовано без змін із v1. Його заявлене джерело — офіційний
-словацький календар **2025 року**, а не окремо перевірена редакція 2026 року.
-Наявність усіх 366 ключів перевірена; семантична актуальність кожного імені для
-нової редакції не перевірялася. Оновлення цього довіреного набору є свідомою
-зміною політики, а не даними, що автоматично завантажуються з мережі.
+Version 0.3.0 uses **baseline schema 3** to record ordinary-file size, modification
+time, and available birth time. Schema 1 and 2 baselines are rejected; there is
+no automatic migration or rebaselining.
 
-Див. `SOURCES.md` і `CHANGELOG.md`.
+1. Stop the monitor and publisher timer before making an intentional upgrade.
+2. Preserve the old baseline, configuration, logs, and state database for review.
+3. Verify the website and trusted calendar/template independently. Investigate
+   pending incidents before accepting a new reference.
+4. Configure a **new database path and a new private state directory**, for example
+   `baseline-v3.db` and `state-v3`. Create the state directory with the correct
+   owner and mode 0700, then run `init` against the verified site. Keep the old data.
+5. Test a clean check, an actual change/recovery, the configured publisher schedule,
+   and real mail receipt before resuming service.
+
+Do not rerun the fresh installer over an existing installation. The runtime state
+schema is separate from the baseline schema; retaining historical state artifacts
+does not imply that pending outbox entries have been migrated to the new state
+directory. The `deliver` command can process preserved old state using a valid
+configuration for that state directory.
+
+## Verification and project layout
+
+[`scripts/check`](scripts/check) is the single local verification entry point:
+formatting, Rust tests, Clippy with `-D warnings`, locked release build, executable
+CLI scenarios, isolated deployment tests, and artifact/native-primitive probes.
+GitHub is used for source control; GitHub Actions is not required.
+
+[`VERIFICATION.json`](VERIFICATION.json) records the commands, timestamps, source
+provenance, and results of an actual local check run. Its logs are in
+`target/check-logs/`. Check the report's source hash/revision and date when using
+it as evidence. Native Python/ctypes and SQLite probes are explicitly separate
+from compiling or executing Rust; `tests/validate_artifacts.py` alone does not
+rewrite the full verification report or certify the Rust tests.
+
+Local build and static systemd verification do **not** establish a production
+installation, live timer/watchdog behavior, web-server configuration, or delivery
+to a real inbox. Deployment tests use an isolated temporary tree and inert command
+fixtures; they neither install host services nor run live `systemctl`.
+
+| Path | Responsibility |
+|---|---|
+| `src/scan.rs`, `src/secure.rs` | Recursive scanning, fingerprints, metadata, and confined Linux filesystem operations. |
+| `src/daily.rs`, `src/publisher.rs` | Daily policy, verified publication, and receipts. |
+| `src/baseline.rs`, `src/config.rs` | Baseline schema, configuration, trusted inputs, and pinning. |
+| `src/journal.rs`, `src/alerts.rs`, `src/monitor.rs` | Audit/state, mail outbox, watcher, and scheduling. |
+| `tests/*.rs` | Rust regression scenarios for correctness and failure handling. |
+| `tests/cli_smoke.py` | End-to-end scenarios against the compiled executable with a fake local MTA. |
+| `tests/deploy_regression.py` | Timezone generation, installer refusal, supervisor transport, and offline unit verification. |
+| `tests/validate_artifacts.py` | Artifact/schema checks and separately scoped native probes. |
+| `deploy/` | Fresh installer, systemd units, timezone generator, and independent failure notifier. |
+
+## Calendar and sources
+
+`namedays.json` is inherited unchanged from the previous project. Its stated
+source is the official Slovak calendar for **2025**, not an independently verified
+2026 edition. All 366 keys are validated structurally; the semantic currency of
+each name in a newer edition has not been rechecked. Updating this trusted dataset
+is an explicit policy change, not a background network fetch.
+
+See [SOURCES.md](SOURCES.md) for provenance and engineering references, and
+[CHANGELOG.md](CHANGELOG.md) for the implementation history.

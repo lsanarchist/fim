@@ -1,6 +1,6 @@
 #![cfg_attr(not(target_os = "linux"), allow(unused))]
 #[cfg(not(target_os = "linux"))]
-compile_error!("fim v2 requires Linux >= 5.6 (openat2); use a Linux VM, not native Windows.");
+compile_error!("fim requires Linux >= 5.6 (openat2); use a Linux VM, not native Windows.");
 
 pub mod alerts;
 pub mod baseline;

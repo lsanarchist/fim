@@ -1,17 +1,17 @@
 {
-  "generated_at": "2026-10-11T15:09:42.062204+00:00",
+  "generated_at": "2026-10-19T22:27:49.632213+00:00",
   "scope": "Local checkout checks; static systemd verification uses an isolated root and fake executable fixtures.",
   "environment": {
-    "platform": "Linux-6.12.38+kali-amd64-x86_64-with-glibc2.43",
-    "python": "3.13.9",
-    "rustc": "rustc 1.93.0 (254b59607 2026-01-19)",
-    "cargo": "cargo 1.93.0 (083ac5135 2025-12-15)"
+    "platform": "Linux-6.18.55-x86_64-with-glibc2.39",
+    "python": "3.12.14",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)"
   },
   "source_provenance": {
-    "git_revision": "dc8917599e01d3c7f85456ca6b9a696bd4aab44a",
+    "git_revision": "cc6303e5281e7e57fd527514739fd20d550cedc0",
     "git_dirty": true,
-    "source_sha256": "f31c24c0eb3f9fc511fb82ca7af0b6dfd4c9c57cd9de7adf870c7f13fd38844e",
-    "source_files": 40,
+    "source_sha256": "0eba3b93074b405101e351d05a3833dd1aae41d626479e9c408bfc6fb64a669b",
+    "source_files": 42,
     "hash_scope": "Git tracked and nonignored untracked paths; excludes target, .git and generated VERIFICATION.json."
   },
   "checks": [
@@ -24,10 +24,10 @@
         "--",
         "--check"
       ],
-      "started_at": "2026-10-11T15:09:42.243373+00:00",
+      "started_at": "2026-10-19T22:27:49.658024+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 0.302,
+      "duration_seconds": 0.068,
       "log": "target/check-logs/rustfmt.log"
     },
     {
@@ -38,15 +38,15 @@
         "--locked",
         "--all-targets"
       ],
-      "started_at": "2026-10-11T15:09:42.545946+00:00",
+      "started_at": "2026-10-19T22:27:49.726364+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 7.483,
+      "duration_seconds": 19.503,
       "log": "target/check-logs/rust-tests.log",
       "rust_suites": [
         {
           "result": "ok",
-          "passed": 0,
+          "passed": 3,
           "failed": 0,
           "ignored": 0
         },
@@ -64,6 +64,12 @@
         },
         {
           "result": "ok",
+          "passed": 13,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "result": "ok",
           "passed": 11,
           "failed": 0,
           "ignored": 0
@@ -71,6 +77,12 @@
         {
           "result": "ok",
           "passed": 42,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "result": "ok",
+          "passed": 10,
           "failed": 0,
           "ignored": 0
         },
@@ -93,10 +105,10 @@
         "-D",
         "warnings"
       ],
-      "started_at": "2026-10-11T15:09:50.029271+00:00",
+      "started_at": "2026-10-19T22:28:09.229696+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 1.179,
+      "duration_seconds": 5.617,
       "log": "target/check-logs/clippy.log"
     },
     {
@@ -107,49 +119,49 @@
         "--locked",
         "--release"
       ],
-      "started_at": "2026-10-11T15:09:51.208405+00:00",
+      "started_at": "2026-10-19T22:28:14.847133+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 8.358,
+      "duration_seconds": 0.075,
       "log": "target/check-logs/release-build.log"
     },
     {
       "check": "cli-smoke",
       "command": [
-        "/usr/bin/python3",
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
         "tests/cli_smoke.py",
-        "/tmp/fim-perf-review-62_cckmk/target/release/fim"
+        "/tmp/fim-core-release-target/release/fim"
       ],
-      "started_at": "2026-10-11T15:09:59.566272+00:00",
+      "started_at": "2026-10-19T22:28:14.922145+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 2.848,
+      "duration_seconds": 2.906,
       "log": "target/check-logs/cli-smoke.log"
     },
     {
       "check": "deploy-regression",
       "command": [
-        "/usr/bin/python3",
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
         "tests/deploy_regression.py"
       ],
-      "started_at": "2026-10-11T15:10:02.413909+00:00",
+      "started_at": "2026-10-19T22:28:17.828210+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 1.428,
+      "duration_seconds": 1.715,
       "log": "target/check-logs/deploy-regression.log"
     },
     {
       "check": "artifact-native-probes",
       "command": [
-        "/usr/bin/python3",
+        "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/bin/python3",
         "tests/validate_artifacts.py",
         "--output",
-        "/run/media/doomguy/Новый том/fim/fim/target/check-artifacts.json"
+        "/workspace/scratch/a06155187697/fim/target/check-artifacts.json"
       ],
-      "started_at": "2026-10-11T15:10:03.841917+00:00",
+      "started_at": "2026-10-19T22:28:19.543871+00:00",
       "exit_code": 0,
       "status": "passed",
-      "duration_seconds": 0.104,
+      "duration_seconds": 0.054,
       "log": "target/check-logs/artifact-native-probes.log"
     }
   ],
@@ -158,11 +170,11 @@
     "Actual email inbox delivery"
   ],
   "artifact_native_probes": {
-    "generated_at": "2026-10-11T15:10:03.926154+00:00",
+    "generated_at": "2026-10-19T22:28:19.585308+00:00",
     "scope": "Artifact checks and direct native/SQLite probes only; Rust execution is recorded separately by scripts/check.",
     "environment": {
-      "platform": "Linux-6.12.38+kali-amd64-x86_64-with-glibc2.43",
-      "python": "3.13.9",
+      "platform": "Linux-6.18.55-x86_64-with-glibc2.39",
+      "python": "3.12.14",
       "rustc_available": true,
       "cargo_available": true
     },
@@ -204,11 +216,13 @@
         "status": "passed"
       }
     ],
-    "rust_regression_tests_written": 63,
+    "rust_regression_tests_written": 86,
     "rust_test_attributes_by_file": {
       "tests/config_publish_regression.rs": 9,
+      "tests/core_regression.rs": 13,
       "tests/journal_regression.rs": 11,
       "tests/regression.rs": 42,
+      "tests/runtime_regression.rs": 10,
       "tests/watchdog_regression.rs": 1
     },
     "outside_scope": [
@@ -221,9 +235,9 @@
     ],
     "important": "Native syscall and SQLite checks do not establish that the Rust program compiles or passes its tests."
   },
-  "completed_at": "2026-10-11T15:10:03.945895+00:00",
+  "completed_at": "2026-10-19T22:28:19.597614+00:00",
   "status": "passed",
   "not_run": [],
   "source_unchanged_during_checks": true,
-  "release_binary_sha256": "0abb2dd77c37b2442ae8194d17f21cdb20fafcbd54148e35e927d7fcd796c7f5"
+  "release_binary_sha256": "4f64fb32ec42af0947f3e7429ade117c070ce692ca3578dca88b3909fa77bdb1"
 }

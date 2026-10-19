@@ -88,10 +88,16 @@ pub fn key_path(key: &str) -> Result<PathBuf> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&key[i..i + 2], 16))
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(!bytes.contains(&0), "Invalid NUL byte in baseline path");
     let path = PathBuf::from(OsString::from_vec(bytes));
     ensure!(
         path.components().all(|c| matches!(c, Component::Normal(_))),
         "Invalid baseline path"
+    );
+    let canonical: PathBuf = path.components().collect();
+    ensure!(
+        path.as_os_str() == canonical.as_os_str() && path_key(&path) == key,
+        "Non-canonical baseline path"
     );
     Ok(path)
 }
@@ -107,6 +113,16 @@ pub fn stable(a: &Metadata, b: &Metadata) -> bool {
         && a.nlink() == b.nlink()
         && (a.mtime(), a.mtime_nsec(), a.ctime(), a.ctime_nsec())
             == (b.mtime(), b.mtime_nsec(), b.ctime(), b.ctime_nsec())
+}
+/// Verify the current pathname still refers to the complete observed snapshot,
+/// not merely to the same inode. This also detects an intervening same-inode write.
+pub fn verify_beneath(root: &File, path: &Path, expected: &Metadata) -> Result<()> {
+    let current = beneath(root, path, libc::O_PATH)?.metadata()?;
+    ensure!(
+        stable(expected, &current),
+        "Path changed/replaced since inspection: {path:?}; result is unverified"
+    );
+    Ok(())
 }
 pub fn read_small(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let mut file = absolute(path, libc::O_RDONLY | libc::O_NONBLOCK)?;
@@ -126,8 +142,8 @@ pub fn read_small(path: &Path, limit: u64) -> Result<Vec<u8>> {
     );
     let again = absolute(path, libc::O_PATH)?.metadata()?;
     ensure!(
-        identity(&before, &again),
-        "Path replaced while reading: {path:?}"
+        stable(&before, &again),
+        "Path changed/replaced while reading: {path:?}"
     );
     Ok(bytes)
 }

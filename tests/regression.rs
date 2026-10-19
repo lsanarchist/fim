@@ -13,9 +13,12 @@ use std::{
     ffi::OsString,
     fs,
     io::Read,
-    os::unix::{
-        ffi::OsStringExt,
-        fs::{symlink, PermissionsExt},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{
+            ffi::OsStringExt,
+            fs::{symlink, PermissionsExt},
+        },
     },
     path::{Path, PathBuf},
     sync::{
@@ -107,12 +110,54 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(5));
     }
 }
-fn process_running(pid: i32) -> bool {
-    // A killed descendant may remain a zombie until its new parent reaps it.
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| s.rsplit_once(") ").map(|(_, tail)| !tail.starts_with('Z')))
-        .unwrap_or(false)
+struct ProcessHandle(OwnedFd);
+impl ProcessHandle {
+    fn open(pid: i32) -> Self {
+        // A sandbox can expose a /proc mount from another PID namespace.
+        // pidfd_open resolves the PID in our namespace and pins its identity,
+        // so neither an unrelated /proc entry nor PID reuse can pass this test.
+        // SAFETY: syscall has only scalar inputs; success returns an owned FD.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(
+            fd >= 0,
+            "cannot pin the live MTA descendant: {}",
+            std::io::Error::last_os_error()
+        );
+        Self(unsafe { OwnedFd::from_raw_fd(fd as _) })
+    }
+
+    fn exited(&self) -> bool {
+        let mut poll = libc::pollfd {
+            fd: self.0.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: valid pointer to one pollfd, containing our owned descriptor.
+        let result = unsafe { libc::poll(&mut poll, 1, 0) };
+        assert!(
+            result >= 0,
+            "pidfd poll failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // Readable pidfds mean the pinned process has exited, including zombies
+        // that await reaping by an external init/subreaper.
+        poll.revents & libc::POLLIN != 0
+    }
+}
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        // Cleanup on assertion failure must target only the pinned test child.
+        // SAFETY: valid pidfd; a null siginfo pointer requests a normal signal.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.0.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            );
+        }
+    }
 }
 
 #[test]
@@ -403,17 +448,33 @@ fn mail_timeout_kills_group_and_preserves_queue() {
     ));
     journal::external(&f.ctx.c, "TEST", "test".into(), true).unwrap();
     let start = Instant::now();
-    assert!(alerts::deliver_one(
-        &f.ctx,
-        &journal::Logger::new(&f.ctx.c),
-        &mut alerts::Sender::default()
-    )
-    .is_err());
-    let pid: i32 = fs::read_to_string(pid_file)
-        .expect("MTA must actually launch its descendant")
-        .parse()
-        .unwrap();
-    wait_until(|| !process_running(pid));
+    thread::scope(|scope| {
+        let delivery = scope.spawn(|| {
+            alerts::deliver_one(
+                &f.ctx,
+                &journal::Logger::new(&f.ctx.c),
+                &mut alerts::Sender::default(),
+            )
+        });
+        let mut pid = None;
+        wait_until(|| {
+            pid = fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok());
+            pid.is_some()
+        });
+        let descendant = ProcessHandle::open(pid.expect("MTA must launch its descendant"));
+        assert!(
+            !descendant.exited(),
+            "descendant must be alive before the timeout"
+        );
+        let error = delivery.join().unwrap().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("sendmail timed out"),
+            "{error:#}"
+        );
+        wait_until(|| descendant.exited());
+    });
     assert!(start.elapsed() < Duration::from_secs(5));
     assert_eq!(journal::queue_size(&f.ctx.c.state_dir).unwrap(), 1);
 }

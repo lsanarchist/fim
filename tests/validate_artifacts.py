@@ -47,7 +47,7 @@ def main():
         assert schemas, source
         for schema in schemas:
             db.executescript(schema.replace('\\\n', ''))
-    assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+    assert db.execute('PRAGMA user_version').fetchone()[0] == 3
     for table in ('baseline', 'policy', 'active', 'audit', 'outbox'):
         db.execute(f'SELECT * FROM {table} LIMIT 0')
     passed('Actual Rust-embedded SQLite schemas execute successfully')

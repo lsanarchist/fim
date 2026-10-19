@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Isolated deployment tests: no user creation, live systemctl, MTA or install."""
+import importlib.util
 import json
 import os
 import shutil
@@ -11,6 +12,9 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 GENERATOR = PROJECT / 'deploy/fim_page_generator.py'
+SUPERVISOR_SPEC = importlib.util.spec_from_file_location('fim_failure_mail', PROJECT / 'deploy/failure_mail.py')
+SUPERVISOR = importlib.util.module_from_spec(SUPERVISOR_SPEC)
+SUPERVISOR_SPEC.loader.exec_module(SUPERVISOR)
 
 
 class DeploymentTests(unittest.TestCase):
@@ -64,8 +68,9 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), 'Europe/Kyiv')
         self.assertEqual(set(self.root.iterdir()), before)
 
-    def installer_fixture(self):
-        project = self.root / 'checkout'
+    def installer_fixture(self, case='default'):
+        fixture = self.root / case
+        project = fixture / 'checkout'
         (project / 'target/release').mkdir(parents=True)
         shutil.copytree(PROJECT / 'deploy', project / 'deploy')
         (project / 'site').mkdir()
@@ -75,7 +80,14 @@ class DeploymentTests(unittest.TestCase):
         binary = project / 'target/release/fim'
         binary.write_text('#!/bin/sh\nexit 0\n')
         binary.chmod(0o755)
-        shims = self.root / 'commands'
+        # Redirect every installation destination into an isolated tree before
+        # executing the real preflight. Mutating commands are additionally inert.
+        script = project / 'deploy/install.sh'
+        text = script.read_text()
+        for prefix in ('/opt/fim', '/var/lib/fim', '/var/www/fim', '/etc/systemd'):
+            text = text.replace(prefix, str(fixture / 'system' / prefix.lstrip('/')))
+        script.write_text(text)
+        shims = fixture / 'commands'
         shims.mkdir()
         identity = shims / 'id'
         identity.write_text('#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }; exit 1\n')
@@ -88,6 +100,70 @@ class DeploymentTests(unittest.TestCase):
         env['PATH'] = str(shims) + os.pathsep + env['PATH']
         env['FIM_MUTATION_LOG'] = str(self.root / 'mutations')
         return project, env
+
+    def test_installer_refuses_existing_and_broken_symlink_targets_before_mutation(self):
+        targets = (
+            '/opt/fim', '/var/lib/fim', '/var/www/fim',
+            '/etc/systemd/system-generators/fim-page-generator',
+            '/etc/systemd/system/fim.service',
+            '/etc/systemd/system/fim-page.timer',
+            '/etc/systemd/system/fim-config.path',
+        )
+        for index, (target, kind) in enumerate((target, kind) for target in targets
+                                               for kind in ('existing', 'broken-link')):
+            with self.subTest(target=target, kind=kind):
+                project, env = self.installer_fixture(f'collision-{index}')
+                destination = project.parent / 'system' / target.lstrip('/')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if kind == 'broken-link':
+                    destination.symlink_to(destination.parent / 'missing-original')
+                elif target in ('/opt/fim', '/var/lib/fim', '/var/www/fim'):
+                    destination.mkdir()
+                    # Neither old config.json nor index.html exists: even a
+                    # partial installation must not have its files overwritten.
+                    (destination / 'keep.txt').write_text('existing data')
+                else:
+                    destination.write_text('existing configuration')
+                result = subprocess.run(['/bin/sh', str(project / 'deploy/install.sh')], env=env,
+                                        text=True, capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Existing install target:', result.stderr)
+                self.assertIn(str(destination), result.stderr)
+                self.assertFalse((self.root / 'mutations').exists())
+                if kind == 'broken-link':
+                    self.assertTrue(destination.is_symlink())
+                elif destination.is_dir():
+                    self.assertEqual((destination / 'keep.txt').read_text(), 'existing data')
+                else:
+                    self.assertEqual(destination.read_text(), 'existing configuration')
+
+    def test_supervisor_resolves_sendmail_relative_to_config_directory(self):
+        directory = self.root / 'mail transport'
+        directory.mkdir()
+        executable = directory / 'sendmail-test'
+        message = self.root / 'submitted.eml'
+        arguments = self.root / 'arguments.json'
+        executable.write_text(f'#!{sys.executable}\n'
+                              'import json, sys\nfrom pathlib import Path\n'
+                              f'Path({str(message)!r}).write_bytes(sys.stdin.buffer.read())\n'
+                              f'Path({str(arguments)!r}).write_text(json.dumps(sys.argv[1:]))\n')
+        executable.chmod(0o700)
+        alias = directory / 'sendmail-alias'
+        alias.symlink_to(executable.name)
+        for transport in ('mail transport/sendmail-test', 'mail transport/sendmail-alias', str(executable)):
+            with self.subTest(sendmail=transport):
+                self.config.write_text(json.dumps({'sendmail': transport,
+                                                   'mail_from': 'fim@example.com',
+                                                   'mail_to': 'admin@example.com'}))
+                SUPERVISOR.notify_failure(self.config, 'fim.service')
+                self.assertEqual(json.loads(arguments.read_text()), ['-i', '-t'])
+                self.assertIn('FIM service failed: fim.service', message.read_text())
+                self.assertIn('Subject: FIM SERVICE FAILURE', message.read_text())
+
+    def test_supervisor_rejects_oversized_configuration_before_submission(self):
+        self.config.write_bytes(b' ' * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(ValueError, 'Configuration exceeds 1 MiB'):
+            SUPERVISOR.notify_failure(self.config, 'fim.service')
 
     def test_installer_missing_style_fails_before_any_mutation(self):
         project, env = self.installer_fixture()

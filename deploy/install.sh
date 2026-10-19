@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")/.."
 [ -x target/release/fim ] || { echo 'Build first: cargo build --release' >&2; exit 1; }
 [ -f target/release/fim ] || { echo 'Release binary is not a regular file.' >&2; exit 1; }
-# Complete source/config preflight before creating users, directories or files.
+# Complete source and timezone preflight before creating users, directories or files.
 for source in config.json namedays.json index.template.html site/style.css \
     deploy/failure_mail.py deploy/fim_page_generator.py deploy/fim.service \
     deploy/fim-page.service deploy/fim-page.timer deploy/fim-failure@.service \
@@ -15,10 +15,21 @@ done
 command -v python3 >/dev/null
 command -v systemctl >/dev/null
 python3 deploy/fim_page_generator.py --check-config config.json >/dev/null
-[ ! -e /opt/fim/config.json ] || { echo 'Existing installation: review/migrate manually, not overwritten.' >&2; exit 1; }
-[ ! -L /opt/fim/config.json ] || { echo 'Existing configuration symlink: not overwritten.' >&2; exit 1; }
-[ ! -e /var/www/fim/site/index.html ] || { echo 'Existing website: not overwritten.' >&2; exit 1; }
-[ ! -L /var/www/fim/site/index.html ] || { echo 'Existing website symlink: not overwritten.' >&2; exit 1; }
+require_unoccupied() {
+    # -e alone misses broken symlinks. Refuse partial installations as well as
+    # complete ones, before install can overwrite assets or follow a link.
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        echo "Existing install target: $1; review/migrate manually, not overwritten." >&2
+        exit 1
+    fi
+}
+for destination in /opt/fim /var/lib/fim /var/www/fim \
+    /etc/systemd/system-generators/fim-page-generator; do
+    require_unoccupied "$destination"
+done
+for source in deploy/*.service deploy/*.timer deploy/*.path; do
+    require_unoccupied "/etc/systemd/system/${source##*/}"
+done
 id fim >/dev/null 2>&1 || useradd --system --user-group --home-dir /var/lib/fim --shell /usr/sbin/nologin fim
 [ "$(id -u fim)" -ne 0 ] || { echo 'fim must not be root.' >&2; exit 1; }
 install -d -o root -g root -m 0755 /opt/fim /var/www/fim
