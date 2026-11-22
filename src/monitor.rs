@@ -1,434 +1,162 @@
-use crate::{
-    add, alerts, baseline,
-    config::ContextData,
-    journal::{self, Journal},
-    publisher, scan, secure, Issue,
-};
-use anyhow::{Context, Result};
-use notify::{
-    event::{AccessKind, AccessMode, ModifyKind},
-    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
-};
-use std::{
-    collections::BTreeSet,
-    os::{
-        linux::net::SocketAddrExt,
-        unix::{fs::MetadataExt, net::UnixDatagram},
-    },
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+//! Commands `init`, `check` and `watch`: compare the website with the baseline,
+//! open/close incidents and queue alerts.
+use crate::{alert, daily, db, scan, App, Issue};
+use anyhow::{ensure, Result};
+use chrono::Utc;
+use rusqlite::Connection;
+use std::{collections::BTreeMap, thread, time::Duration};
 
-pub static TERMINATE: AtomicBool = AtomicBool::new(false);
-extern "C" fn terminate(_: libc::c_int) {
-    TERMINATE.store(true, Ordering::Relaxed);
-}
-pub fn install_signals() {
-    // SAFETY: handler only performs a lock-free atomic store; no allocations/locks/I/O.
-    unsafe {
-        libc::signal(libc::SIGTERM, terminate as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, terminate as *const () as libc::sighandler_t);
-    }
-}
-fn sd_notify(message: &str) {
-    let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
-        return;
+/// Scans the site; index.html is hashed only after its daily block has been verified.
+fn scan_site(app: &App) -> (scan::Snapshot, Vec<Issue>) {
+    let dates = daily::accepted_dates(Utc::now().with_timezone(&app.cfg.timezone));
+    let index = |bytes: &[u8]| -> Result<Vec<u8>> {
+        let html = std::str::from_utf8(bytes)?;
+        Ok(daily::normalize(html, &app.names, &dates)?.into_bytes())
     };
-    let Ok(socket) = UnixDatagram::unbound() else {
-        return;
-    };
-    if let Some(name) = path.strip_prefix('@') {
-        if let Ok(addr) = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()) {
-            let _ = socket.send_to_addr(message.as_bytes(), &addr);
-        }
-    } else {
-        let _ = socket.send_to(message.as_bytes(), path);
-    }
+    scan::scan(&app.cfg.site_dir, &index)
 }
-fn watchdog_interval() -> Duration {
-    // systemd supplies WatchdogSec in microseconds. Ping at half its timeout,
-    // with a 30-second cap when scans are configured several minutes apart.
-    std::env::var("WATCHDOG_USEC")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(|usec| Duration::from_micros((usec / 2).max(1)))
-        .unwrap_or(Duration::from_secs(30))
-        .min(Duration::from_secs(30))
+
+/// `init`: record a known-good site. index.html must be today's render of the template.
+pub fn init(app: &App) -> Result<()> {
+    let template = daily::load_template(&app.cfg.template)?;
+    let (files, issues) = scan_site(app);
+    ensure!(
+        issues.is_empty(),
+        "cannot create a baseline from a damaged site: {issues:?}"
+    );
+    ensure!(
+        files.get("index.html").map(|e| &e.sha256) == Some(&scan::sha256(template.as_bytes())),
+        "index.html does not match the template; run `page` first"
+    );
+    db::save_baseline(&mut db::open(&app.cfg.database)?, &files)?;
+    app.log
+        .write("BASELINE_CREATED", &format!("{} entries", files.len()));
+    Ok(())
 }
-pub struct EventWatch {
-    _watcher: RecommendedWatcher,
-    pub rx: Receiver<notify::Result<Event>>,
-    pub lost: Arc<AtomicBool>,
-}
-pub fn mutation(event: &Event) -> bool {
-    !matches!(event.kind, EventKind::Access(_))
-        || matches!(
-            event.kind,
-            EventKind::Access(AccessKind::Close(AccessMode::Write))
-        )
-}
-impl EventWatch {
-    pub fn new(ctx: &ContextData) -> Result<Self> {
-        let root = ctx.c.root.clone();
-        let (tx, rx) = mpsc::sync_channel(4096);
-        let lost = Arc::new(AtomicBool::new(false));
-        let flag = lost.clone();
-        let mut watcher = RecommendedWatcher::new(
-            move |result: notify::Result<Event>| {
-                if let Ok(e) = &result {
-                    if e.need_rescan() {
-                        flag.store(true, Ordering::Relaxed);
-                    }
-                    if !mutation(e)
-                        || (!e.need_rescan() && !e.paths.iter().any(|p| p.starts_with(&root)))
-                    {
-                        return;
-                    }
-                }
-                if tx.try_send(result).is_err() {
-                    flag.store(true, Ordering::Relaxed);
-                }
-            },
-            notify::Config::default().with_follow_symlinks(false),
-        )?;
-        watcher.watch(&ctx.c.root, RecursiveMode::Recursive)?;
-        watcher.watch(
-            ctx.c.root.parent().context("No root parent")?,
-            RecursiveMode::NonRecursive,
-        )?;
-        // A protected staging directory allows correlating authorized publication rename cookies.
-        watcher.watch(&ctx.c.staging_dir, RecursiveMode::NonRecursive)?;
-        Ok(Self {
-            _watcher: watcher,
-            rx,
-            lost,
+
+/// Lists every difference between the baseline and the current scan.
+pub fn compare(base: &scan::Snapshot, now: &scan::Snapshot, problems: Vec<Issue>) -> Vec<Issue> {
+    // A new file that cannot even be read is still a new file.
+    let mut issues: Vec<Issue> = problems
+        .into_iter()
+        .map(|i| match i.kind.as_str() {
+            "UNREADABLE" if !base.contains_key(&i.path) => {
+                Issue::new("ADDED", &i.path, format!("unreadable: {}", i.detail))
+            }
+            _ => i,
         })
-    }
-}
-pub fn classify(events: &[Event], authorized: &BTreeSet<usize>) -> (Vec<String>, Vec<String>) {
-    let mut ordinary = Vec::new();
-    let mut expected = Vec::new();
-    for e in events {
-        let detail = format!("{:?} paths={:?} cookie={:?}", e.kind, e.paths, e.tracker());
-        if matches!(e.kind, EventKind::Modify(ModifyKind::Name(_)))
-            && e.tracker().is_some_and(|t| authorized.contains(&t))
-        {
-            expected.push(detail);
-        } else {
-            ordinary.push(detail);
-        }
-    }
-    (ordinary, expected)
-}
-pub fn run(ctx: ContextData, once: bool) -> Result<i32> {
-    let reminder_interval = Duration::from_secs(ctx.c.reminder_seconds);
-    let first_reminder = Instant::now()
-        .checked_add(reminder_interval)
-        .context("Reminder interval exceeds the supported clock range")?;
-    let _lock = secure::lock(&ctx.c.state_dir.join("monitor.lock"))?;
-    install_signals();
-    let mut j = Journal::new(&ctx.c);
-    j.emit("START", if once { "check" } else { "watch" }, false);
-    if ctx.demo {
-        j.emit(
-            "DEMO_MODE",
-            "Ownership isolation disabled; not for server deployment",
-            false,
-        );
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    let previous_mail_error = j
-        .active
-        .values()
-        .find(|i| i.kind == "MAIL_UNAVAILABLE")
-        .map(|i| i.detail.clone());
-    // A standalone sender may have recovered the queue since the last run.
-    // Apply this to `check` as well: it has no worker to refresh mail health.
-    let previous_mail_error = if previous_mail_error.is_some()
-        && journal::queue_size(&ctx.c.state_dir).is_ok_and(|n| n == 0)
-    {
-        None
-    } else {
-        previous_mail_error
-    };
-    let mail_health: alerts::MailHealth = Arc::new(Mutex::new(previous_mail_error));
-    let worker = if once {
-        None
-    } else {
-        Some(alerts::worker(
-            ctx.clone(),
-            j.logger.clone(),
-            stop.clone(),
-            mail_health.clone(),
-        ))
-    };
-    let loaded = baseline::load(&ctx);
-    let (base, base_error) = match loaded {
-        Ok(b) => (Some(b), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
-    };
-    let root_pin = secure::directory(&ctx.c.root)
-        .and_then(|f| Ok(f.metadata()?))
-        .ok();
-    let mut armed_id = root_pin.as_ref().map(|m| (m.dev(), m.ino()));
-    let mut armed = if once {
-        None
-    } else {
-        Some(EventWatch::new(&ctx))
-    };
-    let mut periodic = Instant::now();
-    let mut debounce: Option<Instant> = None;
-    let mut last_scan = Instant::now() - Duration::from_secs(1);
-    let mut reminder = first_reminder;
-    let mut watch_retry = Instant::now() + Duration::from_secs(ctx.c.interval_seconds);
-    let mut events = Vec::new();
-    let mut event_loss = false;
-    let mut watch_error: Option<String> = None;
-    let mut ever_incident = false;
-    let watchdog_interval = watchdog_interval();
-    let mut next_watchdog = Instant::now() + watchdog_interval;
-    sd_notify("READY=1\nSTATUS=FIM started");
-    loop {
-        if TERMINATE.load(Ordering::Relaxed) {
-            break;
-        }
-        if let Some(result) = &armed {
-            match result {
-                Ok(w) => {
-                    if w.lost.swap(false, Ordering::Relaxed) {
-                        event_loss = true;
-                    }
-                    for result in w.rx.try_iter().take(4096) {
-                        match result {
-                            Ok(e) => {
-                                if events.len() < 4096 {
-                                    events.push(e);
-                                } else {
-                                    event_loss = true;
-                                }
-                                debounce.get_or_insert(Instant::now() + Duration::from_millis(250));
-                            }
-                            Err(e) => {
-                                watch_error = Some(e.to_string());
-                                event_loss = true;
-                            }
-                        }
-                    }
-                }
-                Err(e) => watch_error = Some(format!("{e:#}")),
-            }
-        }
-        // Keep replay corruption visible to the scanner, including one-shot
-        // checks. Leave the original forensic row intact for investigation.
-        let replay_error = journal::replay_logs(&ctx.c.state_dir, &j.logger)
-            .err()
-            .map(|e| format!("{e:#}"));
-        let due = Instant::now() >= periodic
-            || event_loss
-            || debounce.is_some_and(|d| Instant::now() >= d);
-        if due && last_scan.elapsed() >= Duration::from_millis(250) {
-            let began = Instant::now();
-            // Fixed start-to-start deadline; no full interval sleep AFTER the work.
-            if began >= periodic {
-                periodic = began + Duration::from_secs(ctx.c.interval_seconds);
-            }
-            last_scan = began;
-            debounce = None;
-            let snapshot = scan::run(&ctx);
-            let mut issues = if let Some(b) = &base {
-                scan::compare(&b.entries, &snapshot, &j.active)
-            } else {
-                // Without a baseline, retain the last-known path incidents.
-                // Operational health is measured again below; carrying it
-                // forward here would prevent repaired services from recovering.
-                let mut i: crate::Issues = j
-                    .active
-                    .iter()
-                    .filter(|(_, issue)| issue.path_hex.is_some())
-                    .map(|(key, issue)| (key.clone(), issue.clone()))
-                    .collect();
-                i.extend(snapshot.errors.clone());
-                i
+        .collect();
+    for (path, old) in base {
+        let Some(new) = now.get(path) else {
+            // A file that could not be read (or sits in such a directory) is already reported.
+            let hidden = |i: &Issue| {
+                &i.path == path || i.path == "." || path.starts_with(&format!("{}/", i.path))
             };
-            if let Some(e) = &base_error {
-                add(
-                    &mut issues,
-                    Issue::new("BASELINE_UNAVAILABLE", None, e.clone()),
-                );
+            if !issues.iter().any(hidden) {
+                issues.push(Issue::new("DELETED", path, String::new()));
             }
-            for guard in ctx.guards.iter().chain(base.iter().map(|b| &b.guard)) {
-                if let Err(e) = guard.verify(ctx.demo) {
-                    add(
-                        &mut issues,
-                        Issue::new("TRUST_CHANGED", Some(&guard.path), format!("{e:#}")),
-                    );
-                }
-            }
-            let current_root = secure::directory(&ctx.c.root)
-                .and_then(|f| Ok(f.metadata()?))
-                .ok();
-            let current_id = current_root.as_ref().map(|m| (m.dev(), m.ino()));
-            if root_pin.as_ref().map(|m| (m.dev(), m.ino())) != current_id {
-                add(
-                    &mut issues,
-                    Issue::new(
-                        "ROOT_IDENTITY_CHANGED",
-                        None,
-                        "Pinned website directory was replaced",
-                    ),
-                );
-            }
-            if current_id != armed_id && !once {
-                watch_error = Some("Root changed; rearming event coverage".into());
-                watch_retry = Instant::now();
-                armed_id = current_id;
-            }
-            j.logger.status(
-                "HEARTBEAT",
-                format!(
-                    "{} entries; {} errors",
-                    snapshot.entries.len(),
-                    snapshot.errors.len()
-                ),
+            continue;
+        };
+        let mut changes = Vec::new();
+        if new.size != old.size {
+            changes.push(format!("size {} -> {}", old.size, new.size));
+        }
+        if new.mtime != old.mtime {
+            changes.push(format!("mtime {} -> {}", old.mtime, new.mtime));
+        }
+        if new.mode != old.mode {
+            changes.push(format!("mode {:04o} -> {:04o}", old.mode, new.mode));
+        }
+        if new.sha256 != old.sha256 {
+            changes.insert(0, "content (SHA-256)".into());
+            issues.push(Issue::new("MODIFIED", path, changes.join(", ")));
+        } else if !changes.is_empty() {
+            issues.push(Issue::new("METADATA", path, changes.join(", ")));
+        }
+    }
+    for path in now.keys().filter(|p| !base.contains_key(*p)) {
+        issues.push(Issue::new("ADDED", path, String::new()));
+    }
+    issues
+}
+
+fn message(title: &str, issue: &Issue, time: &str, host: &str) -> String {
+    let detail = if issue.detail.is_empty() {
+        "-"
+    } else {
+        &issue.detail
+    };
+    format!(
+        "{title}\nTyp: {}\nSúbor: {}\nDetail: {detail}\nČas: {time}\nServer: {host}",
+        issue.kind, issue.path
+    )
+}
+
+/// One monitoring cycle. Returns the number of open incidents.
+/// Only changes produce alerts: a new incident once, its recovery once.
+pub fn cycle(app: &App, db: &Connection, send: &mut alert::Send) -> Result<usize> {
+    let base = db::load_baseline(db)?;
+    let (files, problems) = scan_site(app);
+    let current: BTreeMap<String, Issue> = compare(&base, &files, problems)
+        .into_iter()
+        .map(|i| (i.key(), i))
+        .collect();
+    let open: BTreeMap<String, Issue> = db::open_incidents(db)?
+        .into_iter()
+        .map(|i| (i.key(), i))
+        .collect();
+    let time = app.log.now();
+    let host = hostname();
+    for (key, issue) in &current {
+        if !open.contains_key(key) {
+            db::add_incident(db, issue, &time)?;
+            app.log.write(
+                "INCIDENT",
+                &format!("{} {} {}", issue.kind, issue.path, issue.detail),
             );
-            if let Some(e) = j.logger.error() {
-                add(&mut issues, Issue::new("LOG_IO", None, e));
-            }
-            if let Some(e) = &j.storage_error {
-                add(&mut issues, Issue::new("STATE_IO", None, e.clone()));
-            }
-            if let Some(e) = &replay_error {
-                add(
-                    &mut issues,
-                    Issue::new("AUDIT_REPLAY_FAILED", None, e.clone()),
-                );
-            }
-            if j.dropped > 0 {
-                add(
-                    &mut issues,
-                    Issue::new(
-                        "AUDIT_LOSS",
-                        None,
-                        format!("{} events lost after persistence/RAM exhaustion", j.dropped),
-                    ),
-                );
-            }
-            if let Ok(health) = mail_health.lock() {
-                if let Some(e) = &*health {
-                    add(&mut issues, Issue::new("MAIL_UNAVAILABLE", None, e.clone()));
-                }
-            }
-            if worker.as_ref().is_some_and(|w| w.is_finished()) {
-                add(
-                    &mut issues,
-                    Issue::new("MAIL_WORKER_DOWN", None, "Mail worker stopped"),
-                );
-            }
-            if let Some(e) = &watch_error {
-                add(
-                    &mut issues,
-                    Issue::new("EVENT_WATCH_DEGRADED", None, e.clone()),
-                );
-            }
-            if event_loss {
-                ever_incident = true;
-                j.emit("EVENT_LOSS","Event queue lost information; full rescan performed; transient history is unrecoverable",true);
-            }
-            let trackers = if event_loss {
-                BTreeSet::new()
-            } else {
-                publisher::authorized_trackers(&ctx, &events)
-            };
-            let (ordinary, expected) = classify(&events, &trackers);
-            // Every non-authorized mutation is auditable/alertable, including change-then-restore.
-            for batch in ordinary.chunks(32) {
-                j.emit("FS_ACTIVITY", batch.join("\n"), true);
-            }
-            for batch in expected.chunks(32) {
-                j.emit("EXPECTED_PUBLICATION", batch.join("\n"), false);
-            }
-            events.clear();
-            event_loss = false;
-            if began.elapsed() > Duration::from_secs(ctx.c.interval_seconds) {
-                add(
-                    &mut issues,
-                    Issue::new(
-                        "SCAN_OVERRUN",
-                        None,
-                        "Scan exceeded configured start-to-start interval",
-                    ),
-                );
-            }
-            ever_incident |= !issues.is_empty() || !ordinary.is_empty();
-            j.reconcile(issues);
-            if Instant::now() >= reminder && !j.active.is_empty() {
-                let example = j.active.values().take(32).collect::<Vec<_>>();
-                j.emit(
-                    "REMINDER",
-                    format!(
-                        "{} active incidents (first 32): {}",
-                        j.active.len(),
-                        serde_json::to_string(&example)?
-                    ),
-                    true,
-                );
-                reminder = Instant::now()
-                    .checked_add(reminder_interval)
-                    .context("Reminder interval exceeds the supported clock range")?;
-            }
-            let _ = j.flush();
-            sd_notify("WATCHDOG=1\nSTATUS=FIM scan completed");
-            next_watchdog = Instant::now() + watchdog_interval;
-            if once {
-                break;
-            }
-        }
-        if !once && watch_error.is_some() && Instant::now() >= watch_retry {
-            armed = Some(EventWatch::new(&ctx));
-            if armed.as_ref().is_some_and(|x| x.is_ok()) {
-                watch_error = None;
-                event_loss = true;
-            }
-            watch_retry = Instant::now() + Duration::from_secs(ctx.c.interval_seconds);
-        }
-        // Log/DB/mail failure never returns out of the watch loop.
-        if j.pending() > 0 || j.storage_error.is_some() {
-            let _ = j.flush();
-        }
-        // Keep the supervisor informed while idle. This stays on the monitor
-        // thread so a blocked scan cannot be concealed by a separate heartbeat.
-        if Instant::now() >= next_watchdog {
-            sd_notify("WATCHDOG=1");
-            next_watchdog = Instant::now() + watchdog_interval;
-        }
-        thread::sleep(Duration::from_millis(100).min(watchdog_interval));
-    }
-    stop.store(true, Ordering::Relaxed);
-    j.emit("STOP", "Monitoring stopped", false);
-    // Drain RAM to SQLite (not email). Abort persistence loop on failure, but remain explicit on stderr.
-    while j.pending() > 0 {
-        if let Err(e) = j.flush() {
-            eprintln!("FIM: unpersisted events at shutdown: {e:#}");
-            ever_incident = true;
-            break;
+            db::queue_alert(db, &message("FIM: INCIDENT", issue, &time, &host))?;
         }
     }
-    if once {
-        let mut sender = alerts::Sender::default();
-        // One bounded delivery attempt. Remaining batches belong to watch/deliver, never silently discarded.
-        if let Err(e) = alerts::deliver_one(&ctx, &j.logger, &mut sender) {
-            eprintln!("FIM email: {e:#}");
-            ever_incident = true;
+    for (key, issue) in &open {
+        if !current.contains_key(key) {
+            db::close_incident(db, issue)?;
+            app.log
+                .write("RECOVERED", &format!("{} {}", issue.kind, issue.path));
+            db::queue_alert(db, &message("FIM: obnovené", issue, &time, &host))?;
         }
     }
-    if let Some(worker) = worker {
-        let _ = worker.join();
+    alert::flush(db, &app.log, send)?;
+    Ok(current.len())
+}
+
+/// `check`: one cycle; exit code 0 = clean, 1 = open incidents.
+pub fn check(app: &App) -> Result<i32> {
+    let db = db::open(&app.cfg.database)?;
+    let open = cycle(app, &db, &mut alert::telegram(&app.cfg))?;
+    app.log
+        .write("CHECK_DONE", &format!("{open} open incident(s)"));
+    Ok(if open == 0 { 0 } else { 1 })
+}
+
+/// `watch`: a cycle every `interval_seconds`. Errors are logged and the loop continues.
+pub fn watch(app: &App) -> Result<i32> {
+    let db = db::open(&app.cfg.database)?;
+    db::load_baseline(&db)?; // refuse to start without a baseline
+    let mut send = alert::telegram(&app.cfg);
+    app.log.write(
+        "WATCH_STARTED",
+        &format!("every {} s", app.cfg.interval_seconds),
+    );
+    loop {
+        if let Err(e) = cycle(app, &db, &mut send) {
+            app.log.write("ERROR", &format!("{e:#}"));
+        }
+        thread::sleep(Duration::from_secs(app.cfg.interval_seconds));
     }
-    Ok(if ever_incident { 1 } else { 0 })
+}
+
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|_| "unknown".into())
 }

@@ -1,0 +1,11 @@
+{
+  "site_dir": "/var/www/fim",
+  "database": "/var/lib/fim/baseline.db",
+  "log_file": "/var/log/fim/fim.log",
+  "template": "/usr/local/share/fim/index.template.html",
+  "namedays": "/usr/local/share/fim/namedays.json",
+  "timezone": "Europe/Bratislava",
+  "interval_seconds": 10,
+  "telegram_bot_token": "REPLACE_WITH_BOT_TOKEN",
+  "telegram_chat_id": "REPLACE_WITH_CHAT_ID"
+}

@@ -1,28 +1,20 @@
 [Unit]
-Description=File integrity monitor
-After=local-fs.target
-OnFailure=fim-failure@%n.service
-StartLimitIntervalSec=300
-StartLimitBurst=5
+Description=FIM - file integrity monitoring of /var/www/fim
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=notify
 User=fim
 Group=fim
-ExecStart=/opt/fim/fim /opt/fim/config.json watch
+ExecStart=/usr/local/bin/fim /etc/fim/config.json watch
 Restart=on-failure
-RestartSec=5
-SuccessExitStatus=0 1
-WatchdogSec=120
-TimeoutStartSec=120
-TimeoutStopSec=130
-KillMode=control-group
-UMask=0077
-ProtectSystem=full
-ProtectHome=true
-ReadOnlyPaths=/opt/fim /var/www/fim
-# A local Postfix sendmail may need its setgid postdrop helper.
-# Do not add NoNewPrivileges=true without re-testing the selected mail transport.
+RestartSec=10
+# The monitor can only write its database and log; the website is read-only for it.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fim /var/log/fim
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=multi-user.target

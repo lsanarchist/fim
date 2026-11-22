@@ -1,0 +1,66 @@
+
+========== 0. Environment ==========
+Sun Nov 22 05:37:50 PM EST 2026
+kali
+active
+active
+active
+
+========== 1. Page served by nginx ==========
+  <p><!-- FIM:daily -->Dnes je 22. 11. 2026. Meniny má Cecília.<!-- /FIM:daily --></p>
+>>> SCREENSHOT: browser http://localhost/ with today's date and name day
+
+========== 2. check on the clean site ==========
+fim check -> exit code 0
+>>> SCREENSHOT: terminal: exit code 0
+
+========== 3. style.css modified ==========
+(waiting 15s for fim.service)
+--- new lines in /var/log/fim/fim.log:
+2026-11-22T23:37:53+01:00 INCIDENT MODIFIED style.css content (SHA-256), size 103 -> 128, mtime 1795386780 -> 1795387070
+2026-11-22T23:37:54+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (1 waiting, will retry)
+2026-11-22T23:38:04+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (1 waiting, will retry)
+fim check -> exit code 1
+>>> SCREENSHOT: terminal with the INCIDENT line + Telegram message MODIFIED style.css
+
+========== 4. file added and file deleted ==========
+(waiting 15s for fim.service)
+--- new lines in /var/log/fim/fim.log:
+2026-11-22T23:38:15+01:00 INCIDENT ADDED backdoor.php unreadable: Permission denied (os error 13)
+2026-11-22T23:38:16+01:00 INCIDENT DELETED robots.txt 
+2026-11-22T23:38:17+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (3 waiting, will retry)
+>>> SCREENSHOT: Telegram messages ADDED backdoor.php and DELETED robots.txt
+
+========== 5. forged daily block ==========
+  <p><!-- FIM:daily -->Dnes je 22. 11. 2026. Meniny má Hacker.<!-- /FIM:daily --></p>
+(waiting 15s for fim.service)
+--- new lines in /var/log/fim/fim.log:
+2026-11-22T23:38:27+01:00 INCIDENT DAILY_BLOCK index.html daily block does not match today's date and name day
+2026-11-22T23:38:28+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (4 waiting, will retry)
+>>> SCREENSHOT: Telegram message DAILY_BLOCK index.html
+
+========== 6. recovery (original files with original metadata) ==========
+(waiting 15s for fim.service)
+--- new lines in /var/log/fim/fim.log:
+2026-11-22T23:38:38+01:00 RECOVERED ADDED backdoor.php
+2026-11-22T23:38:39+01:00 RECOVERED DAILY_BLOCK index.html
+2026-11-22T23:38:40+01:00 RECOVERED DELETED robots.txt
+2026-11-22T23:38:41+01:00 RECOVERED MODIFIED style.css
+2026-11-22T23:38:41+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (8 waiting, will retry)
+fim check -> exit code 0
+>>> SCREENSHOT: RECOVERED lines + Telegram messages 'FIM: obnovené', exit code 0
+
+========== 7. daily update by the timer (manual start of fim-page.service) ==========
+NEXT                         LEFT LAST                        PASSED UNIT           ACTIVATES
+Sun 2026-11-22 18:00:00 EST 21min Sun 2026-11-22 17:32:48 EST      - fim-page.timer fim-page.service
+
+1 timers listed.
+Pass --all to see loaded but inactive timers, too.
+  <p><!-- FIM:daily -->Dnes je 22. 11. 2026. Meniny má Cecília.<!-- /FIM:daily --></p>
+(waiting 15s for fim.service)
+--- new lines in /var/log/fim/fim.log:
+2026-11-22T23:38:50+01:00 PAGE_UPDATED Dnes je 22. 11. 2026. Meniny má Cecília.
+2026-11-22T23:38:52+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (8 waiting, will retry)
+2026-11-22T23:39:02+01:00 ALERT_FAILED #25 FIM: INCIDENT Typ: MODIFIED Súbor: style.css: Telegram answered HTTP 401: Unauthorized (8 waiting, will retry)
+fim check -> exit code 0
+>>> SCREENSHOT: PAGE_UPDATED, no INCIDENT, exit code 0

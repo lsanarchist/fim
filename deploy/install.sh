@@ -1,66 +1,55 @@
 #!/bin/sh
-# Fresh Debian/Ubuntu systemd install only. Never replace a previous trusted baseline.
+# Installs FIM on a Debian/Kali server. Run as root from the repository:
+#   cargo build --release && sudo deploy/install.sh
+# The first run copies config.example.json to /etc/fim/config.json and stops,
+# so you can fill in the Telegram token; then run the script again.
 set -eu
-[ "$(id -u)" -eq 0 ] || { echo 'Run with sudo.' >&2; exit 1; }
 cd "$(dirname "$0")/.."
-[ -x target/release/fim ] || { echo 'Build first: cargo build --release' >&2; exit 1; }
-[ -f target/release/fim ] || { echo 'Release binary is not a regular file.' >&2; exit 1; }
-# Complete source and timezone preflight before creating users, directories or files.
-for source in config.json namedays.json index.template.html site/style.css \
-    deploy/failure_mail.py deploy/fim_page_generator.py deploy/fim.service \
-    deploy/fim-page.service deploy/fim-page.timer deploy/fim-failure@.service \
-    deploy/fim-config.service deploy/fim-config.path; do
-    [ -f "$source" ] && [ -r "$source" ] || { echo "Missing or unreadable install input: $source" >&2; exit 1; }
-done
-command -v python3 >/dev/null
-command -v systemctl >/dev/null
-python3 deploy/fim_page_generator.py --check-config config.json >/dev/null
-require_unoccupied() {
-    # -e alone misses broken symlinks. Refuse partial installations as well as
-    # complete ones, before install can overwrite assets or follow a link.
-    if [ -e "$1" ] || [ -L "$1" ]; then
-        echo "Existing install target: $1; review/migrate manually, not overwritten." >&2
-        exit 1
-    fi
-}
-for destination in /opt/fim /var/lib/fim /var/www/fim \
-    /etc/systemd/system-generators/fim-page-generator; do
-    require_unoccupied "$destination"
-done
-for source in deploy/*.service deploy/*.timer deploy/*.path; do
-    require_unoccupied "/etc/systemd/system/${source##*/}"
-done
-id fim >/dev/null 2>&1 || useradd --system --user-group --home-dir /var/lib/fim --shell /usr/sbin/nologin fim
-[ "$(id -u fim)" -ne 0 ] || { echo 'fim must not be root.' >&2; exit 1; }
-install -d -o root -g root -m 0755 /opt/fim /var/www/fim
-install -d -o fim -g fim -m 0755 /var/www/fim/site
-install -d -o fim -g fim -m 0700 /var/lib/fim /var/www/fim/staging
-install -o root -g root -m 0755 target/release/fim /opt/fim/fim
-install -o root -g root -m 0644 namedays.json index.template.html /opt/fim/
-install -o fim -g fim -m 0644 site/style.css /var/www/fim/site/style.css
-python3 - <<'PY'
-import json
-from pathlib import Path
-c=json.loads(Path('config.json').read_text())
-c.update(root='/var/www/fim/site', database='/opt/fim/baseline.db',
-         calendar='/opt/fim/namedays.json', template='/opt/fim/index.template.html',
-         state_dir='/var/lib/fim', staging_dir='/var/www/fim/staging')
-p=Path('/opt/fim/config.json'); p.write_text(json.dumps(c,indent=2)+'\n'); p.chmod(0o644)
-PY
-install -o root -g root -m 0755 deploy/failure_mail.py /opt/fim/failure_mail.py
-install -d -o root -g root -m 0755 /etc/systemd/system-generators
-install -o root -g root -m 0755 deploy/fim_page_generator.py /etc/systemd/system-generators/fim-page-generator
-install -o root -g root -m 0644 deploy/*.service deploy/*.timer deploy/*.path /etc/systemd/system/
+
+[ "$(id -u)" = 0 ] || { echo "Run as root." >&2; exit 1; }
+[ -x target/release/fim ] || { echo "Build first: cargo build --release" >&2; exit 1; }
+command -v nginx >/dev/null || apt-get install -y nginx
+
+# 1. Monitor user: may read the website, may not write it.
+id fim >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin fim
+
+# 2. Program, template and calendar (read-only, owned by root).
+install -m 0755 target/release/fim /usr/local/bin/fim
+install -d -m 0755 /usr/local/share/fim
+install -m 0644 index.template.html namedays.json /usr/local/share/fim/
+
+# 3. Website: owned by root, readable by everyone. Copied only on the first install:
+#    re-running the script must not change monitored files.
+if [ ! -d /var/www/fim ]; then
+    install -d -m 0755 -o root -g root /var/www/fim
+    install -p -m 0644 -o root -g root site/style.css site/robots.txt /var/www/fim/
+fi
+
+# 4. Private data outside the website: database and log belong to the monitor.
+install -d -m 0750 -o fim -g fim /var/lib/fim /var/log/fim
+[ -f /var/log/fim/fim.log ] || install -m 0640 -o fim -g fim /dev/null /var/log/fim/fim.log
+
+# 5. Configuration with the token: root may edit it, the fim group may only read it.
+if [ ! -f /etc/fim/config.json ]; then
+    install -d -m 0755 /etc/fim
+    install -m 0640 -o root -g fim config.example.json /etc/fim/config.json
+    echo "Fill in telegram_bot_token and telegram_chat_id in /etc/fim/config.json, then run this script again."
+    exit 0
+fi
+
+# 6. First page and baseline (the baseline is never overwritten).
+/usr/local/bin/fim /etc/fim/config.json page
+[ -f /var/lib/fim/baseline.db ] || runuser -u fim -- /usr/local/bin/fim /etc/fim/config.json init
+
+# 7. nginx serves only /var/www/fim.
+install -m 0644 deploy/nginx-fim.conf /etc/nginx/sites-available/fim
+ln -sf /etc/nginx/sites-available/fim /etc/nginx/sites-enabled/fim
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+
+# 8. systemd: monitor + midnight timer.
+install -m 0644 deploy/fim.service deploy/fim-page.service deploy/fim-page.timer /etc/systemd/system/
 systemctl daemon-reload
-cat <<'TEXT'
-Installed, NOT started. Configure mail_from/mail_to and a working local sendmail MTA.
-Then:
-  sudo systemctl daemon-reload
-  sudo -u fim /opt/fim/fim /opt/fim/config.json alert-test
-  sudo -u fim /opt/fim/fim /opt/fim/config.json page
-  sudo /opt/fim/fim /opt/fim/config.json init
-  sudo systemctl enable --now fim-config.path fim.service fim-page.timer
-The timer follows timezone in config.json, including later edits. Invalid timezone
-disables its schedule; inspect fim-config.service and the generator journal.
-Publish ONLY /var/www/fim/site in your web server. Do not make www-data a member of fim.
-TEXT
+systemctl enable nginx fim.service fim-page.timer
+systemctl restart nginx fim.service fim-page.timer
+systemctl --no-pager status fim.service fim-page.timer | grep -E '^\S|Active:'

@@ -1,22 +1,21 @@
 [package]
 name = "fim"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 
 [dependencies]
 anyhow = "1.0"
 chrono = "0.4"
-chrono-tz = "0.10"
-lettre = { version = "0.11", default-features = false, features = ["builder"] }
-libc = "0.2"
-notify = { version = "8.2", default-features = false }
+chrono-tz = { version = "0.10", features = ["serde"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
 tempfile = "3.23"
 
 [profile.release]
 strip = true
-lto = "thin"

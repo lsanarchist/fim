@@ -1,9 +1,7 @@
 /target/
-/baseline*.db*
-/state/*
-!/state/.gitkeep
-/state-v3/
-/staging/*
-!/staging/.gitkeep
+# The real configuration holds the Telegram token: never commit it.
+/config.json
+*.db
+*.log
 /site/index.html
-__pycache__/
+/docs/OBHAJOBA.md

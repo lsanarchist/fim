@@ -1,14 +1,10 @@
 [Unit]
-Description=Daily page publication in the configured timezone
-OnFailure=fim-failure@%n.service
+Description=FIM - update the daily block at midnight (Bratislava time)
 
 [Timer]
-# OnCalendar is supplied by fim-page-generator from /opt/fim/config.json.
-# Without a valid generated schedule this timer deliberately refuses to start.
-AccuracySec=1s
-RandomizedDelaySec=0
+OnCalendar=*-*-* 00:00:00 Europe/Bratislava
 Persistent=true
-Unit=fim-page.service
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

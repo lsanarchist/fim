@@ -1,14 +1,13 @@
 [Unit]
-Description=Verify and publish the daily date/name-day block
-OnFailure=fim-failure@%n.service
+Description=FIM - write today's date and name day into index.html
 
 [Service]
 Type=oneshot
-User=fim
-Group=fim
-ExecStart=/opt/fim/fim /opt/fim/config.json page
-TimeoutStartSec=90
-UMask=0022
-ProtectSystem=full
-ProtectHome=true
-ReadOnlyPaths=/opt/fim
+ExecStart=/usr/local/bin/fim /etc/fim/config.json page
+# Runs as root (owner of the website), but may only write the website and the log.
+# The temporary file is created in /var/www, next to the site directory.
+ProtectSystem=strict
+ReadWritePaths=/var/www /var/log/fim
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
