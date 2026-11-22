@@ -1,0 +1,17 @@
+# Real midnight run of fim-page.timer in the Kali VM (alerts used a placeholder token, hence HTTP 401)
+== now: Mon Nov 23 12:01:00 AM CET 2026
+== journal fim-page.service
+2026-11-22T18:00:00-05:00 kali systemd[1]: Starting fim-page.service - FIM - write today's date and name day into index.html...
+2026-11-22T18:00:00-05:00 kali fim[8825]: 2026-11-23T00:00:00+01:00 PAGE_UPDATED Dnes je 23. 11. 2026. Meniny má Klement.
+2026-11-22T18:00:00-05:00 kali systemd[1]: fim-page.service: Deactivated successfully.
+2026-11-22T18:00:00-05:00 kali systemd[1]: Finished fim-page.service - FIM - write today's date and name day into index.html.
+== log since 23:59
+2026-11-23T00:00:00+01:00 PAGE_UPDATED Dnes je 23. 11. 2026. Meniny má Klement.
+== page
+  <p><!-- FIM:daily -->Dnes je 23. 11. 2026. Meniny má Klement.<!-- /FIM:daily --></p>
+== check
+exit:0
+== open incidents
+NEXT                        LEFT LAST                             PASSED UNIT           ACTIVATES
+Mon 2026-11-23 18:00:00 EST  23h Sun 2026-11-22 18:00:00 EST 1min 0s ago fim-page.timer fim-page.service
+
