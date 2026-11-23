@@ -3,14 +3,14 @@ use crate::{
     scan::{Entry, Snapshot},
     Issue,
 };
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{path::Path, time::Duration};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS baseline(
     path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
-    mtime INTEGER NOT NULL, mode INTEGER NOT NULL);
+    mtime INTEGER NOT NULL, mode INTEGER NOT NULL, uid INTEGER NOT NULL, gid INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS incidents(
     key TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL,
     detail TEXT NOT NULL, since TEXT NOT NULL);
@@ -42,8 +42,8 @@ pub fn save_baseline(db: &mut Connection, files: &Snapshot) -> Result<()> {
     let tx = db.transaction()?;
     for (path, e) in files {
         tx.execute(
-            "INSERT INTO baseline VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![path, e.sha256, e.size, e.mtime, e.mode],
+            "INSERT INTO baseline VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![path, e.sha256, e.size, e.mtime, e.mode, e.uid, e.gid],
         )?;
     }
     tx.commit()?;
@@ -51,13 +51,18 @@ pub fn save_baseline(db: &mut Connection, files: &Snapshot) -> Result<()> {
 }
 
 pub fn load_baseline(db: &Connection) -> Result<Snapshot> {
-    let mut stmt = db.prepare("SELECT path, sha256, size, mtime, mode FROM baseline")?;
+    let sql = "SELECT path, sha256, size, mtime, mode, uid, gid FROM baseline";
+    let mut stmt = db
+        .prepare(sql)
+        .context("baseline has an old format; delete the database and run init again")?;
     let rows = stmt.query_map([], |r| {
         let entry = Entry {
             sha256: r.get(1)?,
             size: r.get(2)?,
             mtime: r.get(3)?,
             mode: r.get(4)?,
+            uid: r.get(5)?,
+            gid: r.get(6)?,
         };
         Ok((r.get(0)?, entry))
     })?;

@@ -1,6 +1,6 @@
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Europe::Bratislava;
-use fim::{config::Config, daily, db, monitor, page, App};
+use fim::{config::Config, daily, db, monitor, page, scan, App};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 const TOKEN: &str = "123456:fake_token_for_tests_only_xyz";
@@ -122,10 +122,13 @@ fn daily_block_is_valid_only_for_the_right_day() {
 
 #[test]
 fn yesterday_is_accepted_only_shortly_after_midnight() {
-    let at = |h, m| Bratislava.with_ymd_and_hms(2026, 11, 22, h, m, 0).unwrap();
-    assert_eq!(daily::accepted_dates(at(0, 1)).len(), 2);
-    assert_eq!(daily::accepted_dates(at(0, 3)).len(), 1);
-    assert_eq!(daily::accepted_dates(at(12, 0)).len(), 1);
+    let at = |d, h, m| Bratislava.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap();
+    let yesterday = at(21, 18, 0); // the page was written yesterday evening
+    assert_eq!(daily::accepted_dates(at(22, 0, 1), yesterday).len(), 2);
+    assert_eq!(daily::accepted_dates(at(22, 0, 3), yesterday).len(), 1);
+    assert_eq!(daily::accepted_dates(at(22, 12, 0), yesterday).len(), 1);
+    // A page written after midnight must carry today's date, even within the grace period.
+    assert_eq!(daily::accepted_dates(at(22, 0, 1), at(22, 0, 0)).len(), 1);
 }
 
 #[test]
@@ -134,6 +137,12 @@ fn clean_site_has_no_incident() {
     let mut sent = Vec::new();
     assert_eq!(cycle(&f, &mut sent), 0);
     assert!(sent.is_empty());
+    // The streamed hash is the real SHA-256 of the file.
+    let base = db::load_baseline(&db::open(&f.app.cfg.database).unwrap()).unwrap();
+    assert_eq!(
+        base["style.css"].sha256,
+        scan::sha256(b"body { color: black }")
+    );
 }
 
 #[test]
@@ -190,6 +199,18 @@ fn permission_change_is_a_metadata_incident() {
     .unwrap();
     assert_eq!(cycle(&f, &mut sent), 1);
     assert!(sent[0].contains("METADATA") && sent[0].contains("-> 0777"));
+    // chown needs root, so the owner check is tested on the comparison itself.
+    let base = db::load_baseline(&db::open(&f.app.cfg.database).unwrap()).unwrap();
+    let mut now = base.clone();
+    now.get_mut("style.css").unwrap().uid += 1;
+    let issues = monitor::compare(&base, &now, Vec::new());
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].kind, "METADATA");
+    assert!(
+        issues[0].detail.starts_with("owner "),
+        "{}",
+        issues[0].detail
+    );
 }
 
 #[test]

@@ -10,14 +10,18 @@ Blok sa mení každý deň o polnoci a **nie je** to incident.
 ## Ako to funguje
 
 1. `init` uloží do SQLite pre každý súbor: cestu, SHA-256, veľkosť, čas
-   modifikácie (mtime) a prístupové práva. Pre adresáre len práva.
+   modifikácie (mtime), prístupové práva a vlastníka (uid:gid). Pre adresáre
+   len práva a vlastníka. Súbory sa hashujú po blokoch, takže aj veľmi veľký
+   súbor zaberie len pár MB pamäte (`index.html` má limit 1 MiB).
 2. `check` / `watch` súbory znovu prečíta a porovná s baseline. Hlási:
    `ADDED`, `DELETED`, `MODIFIED` (iný obsah), `METADATA` (iná veľkosť,
-   mtime alebo práva), `DAILY_BLOCK` (zlý denný blok), `UNREADABLE`.
+   mtime, práva alebo vlastník), `DAILY_BLOCK` (zlý denný blok), `UNREADABLE`.
 3. Denný blok `<!-- FIM:daily -->…<!-- /FIM:daily -->` sa pred hashovaním
    nahradí značkou `{{DAILY}}`, ale **len ak** text v bloku presne zodpovedá
    dnešnému dátumu a menám z kalendára. Zvyšok `index.html` je chránený SHA-256.
-   Prvé 2 minúty po polnoci sa akceptuje aj včerajší blok (časovač ešte nemusel bežať).
+   Včerajší blok sa akceptuje len prvé 2 minúty po polnoci **a len v súbore
+   zapísanom včera** (časovač ho ešte nestihol prepísať). Čokoľvek zapísané
+   dnes musí mať dnešný dátum.
 4. Každý nový incident sa zapíše do logu, do tabuľky `incidents` a pošle sa
    jedna správa na Telegram. Keď sa stav vráti do poriadku, príde jedna správa
    „obnovené“. Rovnaký incident sa v ďalších cykloch neopakuje.
@@ -93,7 +97,8 @@ sudo deploy/install.sh   # 2. beh: page, init, nginx, systemd
 | log | `/var/log/fim/fim.log` | fim |
 
 - `fim.service` – `watch` ako používateľ `fim` (`ProtectSystem=strict`,
-  zapisovať môže len do `/var/lib/fim` a `/var/log/fim`).
+  zapisovať môže len do `/var/lib/fim` a `/var/log/fim`). Pri štarte servera
+  sa spustí až po `fim-page.service`, takže nikdy nevidí včerajší dátum.
 - `fim-page.timer` – `OnCalendar=*-*-* 00:00:00 Europe/Bratislava`,
   `Persistent=true`; spúšťa `fim-page.service` (`page` ako root).
 - nginx (`deploy/nginx-fim.conf`) servíruje len `/var/www/fim`.
@@ -125,6 +130,5 @@ Novšie pridané mená (napr. Kiara, Timur) neboli overené voči oficiálnemu z
 - Útočník s právami root môže zmeniť aj baseline, log a program.
 - Pridaný prázdny adresár sa zistí, ale mtime adresárov sa nesleduje.
 - Mená súborov, ktoré nie sú UTF-8, sa ukladajú v stratovom tvare.
-- Ak server o polnoci nebeží, blok sa aktualizuje až po štarte (`Persistent=true`);
-  dovtedy monitor hlási `DAILY_BLOCK`.
+- `index.html` väčší ako 1 MiB sa hlási ako `UNREADABLE`.
 - Ak správu nedoručí Telegram, opakuje sa každý cyklus; bez siete nepríde nič.

@@ -1,7 +1,8 @@
 [Unit]
 Description=FIM - file integrity monitoring of /var/www/fim
-After=network-online.target
-Wants=network-online.target
+# At boot, write today's page first, so the monitor never sees yesterday's date.
+After=network-online.target fim-page.service
+Wants=network-online.target fim-page.service
 
 [Service]
 User=fim

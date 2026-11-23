@@ -2,14 +2,17 @@
 //! open/close incidents and queue alerts.
 use crate::{alert, daily, db, scan, App, Issue};
 use anyhow::{ensure, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::{collections::BTreeMap, thread, time::Duration};
 
 /// Scans the site; index.html is hashed only after its daily block has been verified.
 fn scan_site(app: &App) -> (scan::Snapshot, Vec<Issue>) {
-    let dates = daily::accepted_dates(Utc::now().with_timezone(&app.cfg.timezone));
-    let index = |bytes: &[u8]| -> Result<Vec<u8>> {
+    let tz = app.cfg.timezone;
+    let index = |bytes: &[u8], mtime: i64| -> Result<Vec<u8>> {
+        let written = DateTime::from_timestamp(mtime, 0).unwrap_or_default();
+        let dates =
+            daily::accepted_dates(Utc::now().with_timezone(&tz), written.with_timezone(&tz));
         let html = std::str::from_utf8(bytes)?;
         Ok(daily::normalize(html, &app.names, &dates)?.into_bytes())
     };
@@ -66,6 +69,12 @@ pub fn compare(base: &scan::Snapshot, now: &scan::Snapshot, problems: Vec<Issue>
         }
         if new.mode != old.mode {
             changes.push(format!("mode {:04o} -> {:04o}", old.mode, new.mode));
+        }
+        if (new.uid, new.gid) != (old.uid, old.gid) {
+            changes.push(format!(
+                "owner {}:{} -> {}:{}",
+                old.uid, old.gid, new.uid, new.gid
+            ));
         }
         if new.sha256 != old.sha256 {
             changes.insert(0, "content (SHA-256)".into());

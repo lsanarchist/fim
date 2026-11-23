@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 pub const START: &str = "<!-- FIM:daily -->";
 pub const END: &str = "<!-- /FIM:daily -->";
 pub const TOKEN: &str = "{{DAILY}}";
-/// Right after midnight the page timer may not have run yet, so yesterday's block
-/// is still accepted for this many seconds.
+/// Right after midnight the page timer may not have run yet, so yesterday's block is
+/// still accepted for this many seconds - but only in a file last written yesterday.
 pub const GRACE_SECONDS: u32 = 120;
 
 /// "MM-DD" -> names; an empty string means nobody has a name day (public holidays).
@@ -104,10 +104,12 @@ pub fn normalize(html: &str, names: &Names, dates: &[NaiveDate]) -> Result<Strin
     bail!("daily block does not match today's date and name day")
 }
 
-/// Today, plus yesterday during the first GRACE_SECONDS after midnight.
-pub fn accepted_dates(now: DateTime<Tz>) -> Vec<NaiveDate> {
+/// Today; yesterday too, but only during the first GRACE_SECONDS after midnight and
+/// only if index.html was `written` before today (yesterday's page, not yet replaced).
+/// Whatever is written today must carry today's date.
+pub fn accepted_dates(now: DateTime<Tz>, written: DateTime<Tz>) -> Vec<NaiveDate> {
     let today = now.date_naive();
-    if now.num_seconds_from_midnight() < GRACE_SECONDS {
+    if now.num_seconds_from_midnight() < GRACE_SECONDS && written.date_naive() < today {
         vec![today, today - Duration::days(1)]
     } else {
         vec![today]
